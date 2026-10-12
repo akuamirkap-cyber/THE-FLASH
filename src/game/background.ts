@@ -27,10 +27,12 @@ const LAYERS: Layer[] = [
   { par: 0.3, base: 630, amp: 34, f1: 0.0031, f2: 0.0072, f3: 0.015, p1: 1.3, p2: 3.7, p3: 2.2, ridge: false, key: 'l4', featScale: 1.2, featProb: 0.26 },
 ];
 
-function layerY(L: Layer, wx: number, camY: number): number {
+function layerY(L: Layer, wx: number, camY: number, screenX = 0): number {
   const a = L.ridge ? (0.5 - Math.abs(Math.sin(wx * L.f1 + L.p1))) * 2 : Math.sin(wx * L.f1 + L.p1);
   const h = 0.55 * a + 0.3 * Math.sin(wx * L.f2 + L.p2) + 0.15 * Math.sin(wx * L.f3 + L.p3);
-  return L.base - L.amp * h - camY * L.par * 0.6;
+  // Kemiringan lereng gunung di cakrawala (menurun ke kanan bawah, konsisten dengan lereng pemain)
+  const mountainTilt = (screenX - W * 0.45) * 0.08 * (0.3 + L.par);
+  return L.base + mountainTilt - L.amp * h - camY * L.par * 0.6;
 }
 
 const STARS = Array.from({ length: 90 }, (_, i) => ({
@@ -80,6 +82,92 @@ function drawFeature(ctx: CanvasRenderingContext2D, type: number, x: number, y: 
   ctx.fill();
 }
 
+function drawHotAirBalloon(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  sc: number,
+  pal: Palette,
+  seed: number,
+  time: number,
+) {
+  const c = pal.c;
+  ctx.save();
+  ctx.translate(x, y);
+
+  const bob = Math.sin(time * 0.8 + seed) * 4 * sc;
+  ctx.translate(0, bob);
+
+  const bw = 24 * sc;
+  const bh = 32 * sc;
+
+  // Tubuh balon udara
+  ctx.beginPath();
+  ctx.moveTo(0, -bh);
+  ctx.bezierCurveTo(bw * 1.25, -bh, bw * 1.15, 0, bw * 0.38, bh * 0.38);
+  ctx.lineTo(bw * 0.28, bh * 0.52);
+  ctx.lineTo(-bw * 0.28, bh * 0.52);
+  ctx.lineTo(-bw * 0.38, bh * 0.38);
+  ctx.bezierCurveTo(-bw * 1.15, 0, -bw * 1.25, -bh, 0, -bh);
+  ctx.closePath();
+
+  const bg = ctx.createLinearGradient(0, -bh, 0, bh * 0.52);
+  bg.addColorStop(0, css(c.sun, 0.95));
+  bg.addColorStop(0.5, css(mix(c.rim, c.l1, 0.4), 0.9));
+  bg.addColorStop(1, css(c.obs, 0.85));
+  ctx.fillStyle = bg;
+  ctx.fill();
+
+  // Garis pola lengkung vertikal
+  ctx.strokeStyle = css(c.skyTop, 0.25);
+  ctx.lineWidth = 1.2 * sc;
+  ctx.beginPath();
+  ctx.moveTo(0, -bh);
+  ctx.quadraticCurveTo(bw * 0.5, -bh * 0.3, 0, bh * 0.52);
+  ctx.moveTo(0, -bh);
+  ctx.quadraticCurveTo(-bw * 0.5, -bh * 0.3, 0, bh * 0.52);
+  ctx.stroke();
+
+  // Nyala api kompor (burner flame glow)
+  const flameGlow = ctx.createRadialGradient(0, bh * 0.56, 1, 0, bh * 0.56, 10 * sc);
+  flameGlow.addColorStop(0, 'rgba(255,220,100,0.85)');
+  flameGlow.addColorStop(1, 'rgba(255,160,40,0)');
+  ctx.fillStyle = flameGlow;
+  ctx.fillRect(-12 * sc, bh * 0.4, 24 * sc, 20 * sc);
+
+  // Tali gantungan keranjang
+  ctx.strokeStyle = css(c.obs, 0.55);
+  ctx.lineWidth = 1 * sc;
+  ctx.beginPath();
+  ctx.moveTo(-bw * 0.22, bh * 0.52);
+  ctx.lineTo(-bw * 0.16, bh * 0.76);
+  ctx.moveTo(bw * 0.22, bh * 0.52);
+  ctx.lineTo(bw * 0.16, bh * 0.76);
+  ctx.stroke();
+
+  // Keranjang penumpang
+  const basketW = bw * 0.36;
+  const basketH = bh * 0.22;
+  const basketY = bh * 0.76;
+  ctx.fillStyle = css(c.obs, 0.85);
+  ctx.fillRect(-basketW / 2, basketY, basketW, basketH);
+
+  // Tali bendera pita trailing di angin gurun (Alto's Odyssey ribbon)
+  const trailLen = 42 * sc;
+  ctx.strokeStyle = css(c.rim, 0.65);
+  ctx.lineWidth = 1.2 * sc;
+  ctx.beginPath();
+  ctx.moveTo(0, basketY + basketH);
+  for (let t = 1; t <= 4; t++) {
+    const tx = -t * (trailLen / 4) + Math.sin(time * 3 + seed + t) * 3 * sc;
+    const ty = basketY + basketH + t * 6 * sc;
+    ctx.lineTo(tx, ty);
+  }
+  ctx.stroke();
+
+  ctx.restore();
+}
+
 export function drawBackground(
   ctx: CanvasRenderingContext2D,
   pal: Palette,
@@ -88,7 +176,7 @@ export function drawBackground(
   time: number,
   boost: number,
   speed: number,
-  zoom = 1,
+  _zoom = 1,
 ) {
   const c = pal.c;
   const boundX0 = -W * 1.4;
@@ -186,6 +274,18 @@ export function drawBackground(
     }
   }
 
+  // ---- Balon Udara Gurun (Hot Air Balloons khas Alto's Odyssey) ----
+  const balloonCount = 4;
+  for (let bi = 0; bi < balloonCount; bi++) {
+    const bpar = 0.05 + bi * 0.04;
+    const bdrift = 5 + bi * 3;
+    const span = W + 1400;
+    const bx = mod(hash(bi * 9.7 + 12) * span - camX * bpar - time * bdrift, span) - 350;
+    const by = 135 + hash(bi * 4.3 + 7) * 220 - camY * 0.04;
+    const bscale = 0.52 + hash(bi * 3.1) * 0.42;
+    drawHotAirBalloon(ctx, bx, by, bscale, pal, bi * 13, time);
+  }
+
   // ---- Lapisan pegunungan / bukit pasir ----
   for (let li = 0; li < LAYERS.length; li++) {
     const L = LAYERS[li];
@@ -201,7 +301,7 @@ export function drawBackground(
       if (hash(ci * 1.37 + li * 19.1) > L.featProb) continue;
       const wx = ci * cellW + hash(ci * 3.3 + li * 7.7) * cellW * 0.8;
       const fxs = wx - offset;
-      const fy = layerY(L, wx, camY);
+      const fy = layerY(L, wx, camY, fxs);
       const type = Math.floor(hash(ci * 5.5 + li * 3.3) * 4);
       drawFeature(ctx, type, fxs, fy, L.featScale);
     }
@@ -215,7 +315,7 @@ export function drawBackground(
     ctx.beginPath();
     ctx.moveTo(boundX0, boundY1);
     for (let x = boundX0; x <= boundX1; x += 14) {
-      ctx.lineTo(x, layerY(L, x + offset, camY));
+      ctx.lineTo(x, layerY(L, x + offset, camY, x));
     }
     ctx.lineTo(boundX1, boundY1);
     ctx.closePath();
@@ -227,7 +327,7 @@ export function drawBackground(
       ctx.lineWidth = 2;
       ctx.beginPath();
       for (let x = boundX0; x <= boundX1; x += 14) {
-        const y = layerY(L, x + offset, camY) + 26 + 5 * Math.sin((x + offset) * 0.02);
+        const y = layerY(L, x + offset, camY, x) + 26 + 5 * Math.sin((x + offset) * 0.02);
         if (x === boundX0) ctx.moveTo(x, y);
         else ctx.lineTo(x, y);
       }

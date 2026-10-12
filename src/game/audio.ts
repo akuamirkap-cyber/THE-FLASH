@@ -157,13 +157,14 @@ export class Sfx {
     const ctx = this.ctx;
     if (!ctx) return;
     const now = ctx.currentTime;
-    if (now - this.orbTime > 0.9) this.orbStep = 0;
+    if (now - this.orbTime > 1.1) this.orbStep = 0;
     this.orbTime = now;
     const n = SCALE[this.orbStep % SCALE.length];
     this.orbStep++;
-    const f = 523.25 * Math.pow(2, n / 12);
-    this.tone(f, 0.5, 'sine', 0.1, undefined, 0.5);
-    this.tone(f * 2, 0.3, 'triangle', 0.035, undefined, 0.4);
+    // Nada lonceng kristal lirih & halus (zen & damai khas Alto's Odyssey)
+    const f = 587.33 * Math.pow(2, n / 12);
+    this.tone(f, 0.45, 'sine', 0.024, undefined, 0.75, 0.012);
+    this.tone(f * 2.01, 0.32, 'sine', 0.008, undefined, 0.6, 0.012);
   }
   boost() {
     this.tone(180, 0.7, 'sawtooth', 0.08, 1400, 0.3);

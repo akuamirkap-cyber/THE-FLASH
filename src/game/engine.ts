@@ -17,7 +17,7 @@ import {
   W,
   baseSpeed,
 } from './config';
-import { groundY, slopeAt } from './terrain';
+import { DOWNHILL_SLOPE, groundY, slopeAt } from './terrain';
 import { Palette, paletteAt } from './palette';
 import { drawBackground } from './background';
 import { drawRunner, RunnerView } from './character';
@@ -399,7 +399,7 @@ export class Game {
     this.particles = [];
     this.ghosts = [];
     this.ribbon = Array.from({ length: RIB_N }, (_, i) => ({ x: this.p.x - i * RIB_L, y: this.p.y - 57 }));
-    this.nextX = 1500;
+    this.nextX = 2200;
     this.lastEnd = 0;
     this.lastKind = '';
     this.spawning = play;
@@ -422,7 +422,14 @@ export class Game {
     this.jumpBuf = 0;
     this.jumpHeld = false;
     this.slideHeld = false;
-    if (play) this.addOrbLine(700, 7, 42);
+    if (play) {
+      this.addOrbLine(700, 7, 42);
+      this.addOrbLine(1400, 7, 42);
+      // Pre-spawn rintangan jauh di depan (hingga 4500px) sebelum pemain melangkah
+      const initHorizon = this.p.x + 4500;
+      let guard = 0;
+      while (this.nextX < initHorizon && guard++ < 30) this.spawnPattern();
+    }
   }
 
   private isGap(x: number): boolean {
@@ -582,9 +589,9 @@ export class Game {
         end = this.placeSlab(x, s);
         break;
       case 'boulder': {
-        const trig = this.lastEnd + 80;
+        const trig = this.lastEnd + 300;
         this.events.push(trig);
-        end = trig + (W - PSX) + 90 + s * 0.9 + 100;
+        end = trig + 2200;
         break;
       }
       case 'combo':
@@ -609,11 +616,13 @@ export class Game {
 
   private spawnBoulder() {
     const p = this.p;
+    // Spawn batu menggelinding SANGAT JAUH di luar pandangan kamera (minimal 2400px di depan pemain)
+    const farAhead = Math.max(2400, (W / Math.min(0.42, this.camZoom)) + 1500);
     this.obstacles.push({
       kind: 'boulder',
-      x: p.x + (W - PSX) + 90,
-      r: rand(22, 30),
-      vx: -rand(130, 190),
+      x: p.x + farAhead + rand(100, 300),
+      r: rand(24, 34),
+      vx: -rand(140, 210),
       rot: 0,
       dustT: 0,
       dead: false,
@@ -749,6 +758,15 @@ export class Game {
     p.flipT = -1;
     p.flip = 0;
     p.cut = false;
+    const slope = slopeAt(p.x);
+    if (slope > 0.08 && impact > 80) {
+      // Sandboard downslope carving: pertahankan momentum & dorongan kecepatan
+      const boostGain = Math.min(85, impact * 0.09 * slope);
+      this.speed = Math.min(1100, this.speed + boostGain);
+      if (this.boostT <= 0 && this.meter < 1) {
+        this.meter = Math.min(1, this.meter + 0.025);
+      }
+    }
     if (impact > 260) {
       this.sfx.land();
       this.dustBurst(p.x, g, 8);
@@ -800,10 +818,11 @@ export class Game {
 
     // ---- Kecepatan
     const slope = slopeAt(p.x);
-    const mod2 = 1 + clamp(slope * 0.45, -0.1, 0.12);
+    const slideBonus = (p.sliding && slope > 0.02) ? slope * 0.45 : 0;
+    const mod2 = 1 + clamp(slope * 0.55 + slideBonus, -0.16, 0.35);
     // Saat boost, kecepatan meningkat bertahap hingga 5x bila dipanjer!
     const target = baseSpeed(this.dist) * mod2 * (boosting ? this.boostMult : 1);
-    const acc = boosting ? (this.boostHeld ? 3600 : 2600) : 500;
+    const acc = boosting ? (this.boostHeld ? 3600 : 2600) : 550;
     this.speed += clamp(target - this.speed, -acc * dt, acc * dt);
 
     // ---- Input lompat
@@ -855,7 +874,8 @@ export class Game {
       const g = groundY(p.x);
       const solid = boosting || !this.isGap(p.x);
       if (solid && p.y >= g && p.vy >= 0) {
-        if (!boosting && p.y - g > 28) this.die('wall');
+        const nearChasmWall = this.gaps.some((gp) => Math.abs(p.x - gp.x1) < 42 && p.y > g + 22);
+        if (!boosting && nearChasmWall) this.die('wall');
         else this.land(g);
       }
       if (this.state === 'playing' && p.y > g + 380) this.die('fall');
@@ -864,10 +884,11 @@ export class Game {
 
     // ---- Spawn & peristiwa
     if (this.spawning) {
-      const viewMargin = (W / this.camZoom) * 0.85 + 200;
-      const horizon = this.camX + W + viewMargin + 700;
+      // Jarak horizon spawn minimal 3500px - 4500px jauh di luar batas kamera
+      const viewMargin = (W / Math.min(0.42, this.camZoom)) + 600;
+      const horizon = this.camX + viewMargin + 3500;
       let guard = 0;
-      while (this.nextX < horizon && guard++ < 6) this.spawnPattern();
+      while (this.nextX < horizon && guard++ < 20) this.spawnPattern();
       while (this.events.length && p.x >= this.events[0]) {
         this.events.shift();
         this.spawnBoulder();
@@ -875,8 +896,8 @@ export class Game {
       this.cleanT -= dt;
       if (this.cleanT <= 0) {
         this.cleanT = 0.5;
-        const cut = p.x - PSX - 500;
-        this.obstacles = this.obstacles.filter((o) => !o.dead && o.x > cut - 400);
+        const cut = p.x - PSX - 1200;
+        this.obstacles = this.obstacles.filter((o) => !o.dead && o.x > cut - 600);
         this.orbList = this.orbList.filter((o) => !o.taken && o.x > cut);
         this.gaps = this.gaps.filter((g) => g.x1 > cut);
       }
@@ -1123,8 +1144,10 @@ export class Game {
 
     // kamera
     this.camX = p.x - PSX;
-    const ty = groundY(p.x + 140);
-    this.camY += (ty - this.camY) * Math.min(1, dt * 3.2);
+    const aheadGround = groundY(p.x + 150);
+    const airOffset = Math.min(0, (p.y - aheadGround) * 0.42);
+    const ty = aheadGround + airOffset;
+    this.camY += (ty - this.camY) * Math.min(1, dt * 3.5);
 
     // Zoom out kamera 2x secara halus (target 0.5) saat ngeboost, melebar dinamis hingga 0.42 saat 5x
     const targetZoom = this.boostT > 0
@@ -1259,7 +1282,8 @@ export class Game {
     ctx.translate(-focusX, -focusY);
     ctx.translate(ox, oy);
 
-    drawBackground(ctx, pal, this.camX, this.camY, this.time, this.boostK, this.speed, z);
+    const camYRel = this.camY - (this.camX + PSX) * DOWNHILL_SLOPE;
+    drawBackground(ctx, pal, this.camX, camYRel, this.time, this.boostK, this.speed, z);
     this.drawGround(pal);
     this.drawDecor(pal);
 
@@ -1287,7 +1311,7 @@ export class Game {
     const ctx = this.ctx;
     const c = pal.c;
     const camX = this.camX;
-    const margin = (W / this.camZoom) * 0.85 + 120;
+    const margin = (W / Math.min(0.4, this.camZoom)) + 300;
     const x0 = camX - margin;
     const x1 = camX + W + margin;
     const groundBottom = H + 600;
@@ -1405,33 +1429,79 @@ export class Game {
   private drawDecor(pal: Palette) {
     const ctx = this.ctx;
     const c = pal.c;
-    const cell = 70;
-    const margin = (W / this.camZoom) * 0.85 + 100;
+    const cell = 75;
+    const margin = (W / Math.min(0.4, this.camZoom)) + 300;
     const first = Math.floor((this.camX - margin) / cell) - 1;
     const last = Math.floor((this.camX + W + margin) / cell) + 1;
     const col = mix(c.gBot, c.obs, 0.25);
+    const stoneCol = mix(c.obs, c.gTop, 0.35);
     ctx.lineCap = 'round';
     for (let ci = first; ci <= last; ci++) {
-      if (hash(ci * 2.17) > 0.5) continue;
+      const hval = hash(ci * 2.17);
+      if (hval > 0.58) continue;
       const wx = ci * cell + hash(ci * 5.1) * cell;
-      if (this.isGap(wx) || this.isGap(wx - 12) || this.isGap(wx + 12)) continue;
+      if (this.isGap(wx) || this.isGap(wx - 16) || this.isGap(wx + 16)) continue;
       const x = wx - this.camX;
-      const y = groundY(wx) + 8 + hash(ci * 4.4) * 34 - this.camY + GS;
-      if (hash(ci * 9.3) < 0.6) {
+      const y = groundY(wx) - this.camY + GS;
+      const slope = slopeAt(wx);
+      const rot = Math.atan(slope);
+
+      ctx.save();
+      ctx.translate(x, y);
+      ctx.rotate(rot);
+
+      const dType = hash(ci * 7.7);
+      if (dType < 0.25) {
+        // Bendera doa gurun berkibar (prayer flag poles khas Alto's Odyssey)
+        const poleH = 20 + hash(ci * 3.1) * 18;
+        ctx.strokeStyle = css(mix(col, c.rim, 0.35), 0.85);
+        ctx.lineWidth = 1.6;
+        ctx.beginPath();
+        ctx.moveTo(0, 2);
+        ctx.lineTo(1, -poleH);
+        ctx.stroke();
+
+        const flagW = 11 + hash(ci * 4.9) * 8;
+        const flagH = 7 + hash(ci * 1.7) * 4;
+        const flutter = Math.sin(this.time * 6 + ci) * 2;
+        ctx.fillStyle = css(c.rim, 0.8);
+        ctx.beginPath();
+        ctx.moveTo(1, -poleH);
+        ctx.lineTo(1 + flagW, -poleH + flagH * 0.5 + flutter);
+        ctx.lineTo(1, -poleH + flagH);
+        ctx.closePath();
+        ctx.fill();
+      } else if (dType < 0.52) {
+        // Tumpukan batu gurun kuno (stone cairn)
+        ctx.fillStyle = css(stoneCol, 0.85);
+        const stones = 3 + Math.floor(hash(ci * 9.1) * 2);
+        let currY = 0;
+        for (let s = 0; s < stones; s++) {
+          const sw = (7 - s * 1.4) + hash(ci + s) * 2;
+          const sh = 3.5 + hash(ci * 2 + s) * 2;
+          ctx.beginPath();
+          ctx.ellipse(hash(ci * 3 + s) * 2 - 1, currY - sh / 2, sw, sh / 2, 0, 0, TAU);
+          ctx.fill();
+          currY -= sh;
+        }
+      } else if (dType < 0.78) {
+        // Rerumputan kering gurun
         ctx.strokeStyle = css(col, 0.7);
         ctx.lineWidth = 1.7;
         for (let k = -1; k <= 1; k++) {
           ctx.beginPath();
-          ctx.moveTo(x + k * 3, y);
-          ctx.quadraticCurveTo(x + k * 4, y - 8, x + k * 8, y - 11 - hash(ci + k) * 4);
+          ctx.moveTo(k * 3, 2);
+          ctx.quadraticCurveTo(k * 4, -8, k * 8, -11 - hash(ci + k) * 4);
           ctx.stroke();
         }
       } else {
-        ctx.fillStyle = css(col, 0.28);
+        // Kerikil pasir halus
+        ctx.fillStyle = css(col, 0.35);
         ctx.beginPath();
-        ctx.ellipse(x, y, 7 + hash(ci) * 5, 3 + hash(ci * 2) * 2, 0, 0, TAU);
+        ctx.ellipse(0, 1, 6 + hash(ci) * 4, 3, 0, 0, TAU);
         ctx.fill();
       }
+      ctx.restore();
     }
   }
 
@@ -1441,7 +1511,7 @@ export class Game {
     const camX = this.camX;
     const camY = this.camY;
     const xs = r.x - camX;
-    const margin = (W / this.camZoom) * 0.85 + 100;
+    const margin = (W / Math.min(0.4, this.camZoom)) + 300;
     if (xs > W + margin || xs + r.w < -margin) return;
     const pt = (u: number, v: number): [number, number] => {
       const wx = r.x + u * r.w;
@@ -1507,7 +1577,7 @@ export class Game {
     const camX = this.camX;
     const camY = this.camY;
     const xs = a.x - camX;
-    const margin = (W / this.camZoom) * 0.85 + 100;
+    const margin = (W / Math.min(0.4, this.camZoom)) + 300;
     if (xs > W + margin || xs + a.w < -margin) return;
     const X0 = a.x;
     const X1 = a.x + a.w;
@@ -1615,7 +1685,7 @@ export class Game {
     const ctx = this.ctx;
     const c = pal.c;
     const sx = b.x - this.camX;
-    const margin = (W / this.camZoom) * 0.85 + 100;
+    const margin = (W / Math.min(0.4, this.camZoom)) + 300;
     if (sx > W + margin || sx < -margin) return;
     const by = groundY(b.x) - b.r - this.camY + GS;
     ctx.save();
@@ -1650,7 +1720,7 @@ export class Game {
 
   private drawOrbs() {
     const ctx = this.ctx;
-    const margin = (W / this.camZoom) * 0.85 + 60;
+    const margin = (W / Math.min(0.4, this.camZoom)) + 300;
     for (const o of this.orbList) {
       if (o.taken) continue;
       const x = o.x - this.camX;
