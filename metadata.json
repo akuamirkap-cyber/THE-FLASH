@@ -1,6 +1,6 @@
 {
   "name": "Kilat Odyssey",
-  "description": "Game lari 2D minimalis yang indah. Berlari secepat kilat melintasi bukit pasir dan reruntuhan kuno.",
+  "description": "Game terbang 2D minimalis yang indah. Menunggang naga secepat kilat melintasi lereng bukit pasir dan menara batu kuno.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

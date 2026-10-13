@@ -1,28 +1,40 @@
 import {
-  ARCH_H,
-  BOOST_DUR,
-  COYOTE,
-  GRAVITY,
+  ALT_SOFT,
+  BELLY,
+  BODY_R,
+  BOOST_DRAIN,
+  BOOST_FLOOR,
+  BOOST_MIN,
+  BOOST_MULT_MAX,
+  BOOST_MULT_MIN,
+  BOOST_RAMP,
+  BOOST_REGEN,
+  CLIMB_ACC,
+  CLIMB_V,
+  DIVE_ACC,
+  DIVE_V,
+  FLY_Y,
+  GLIDE_ACC,
   GS,
   H,
-  HIT_W,
-  JUMP_CUT,
-  JUMP_V,
+  LIFT,
+  MAX_ALT,
+  NOSE,
   ORB_GAIN,
   PSX,
   PX_PER_M,
+  SINK_V,
+  SLAM_V,
   STEP,
-  TUNNEL,
-  TUNNEL_V,
   W,
   baseSpeed,
 } from './config';
 import { DOWNHILL_SLOPE, groundY, slopeAt } from './terrain';
 import { Palette, paletteAt } from './palette';
 import { drawBackground } from './background';
-import { drawRunner, RunnerView } from './character';
+import { drawDragon, DragonView } from './dragon';
 import { Sfx } from './audio';
-import { TAU, clamp, css, hash, lerp, mix, mod, rand } from './util';
+import { TAU, clamp, css, hash, lerp, mix, mod, rand, smooth } from './util';
 
 export type GameState = 'menu' | 'playing' | 'paused' | 'dying' | 'over';
 
@@ -34,6 +46,7 @@ export interface Hud {
   boosting: boolean;
   ready: boolean;
   boostMult?: number;
+  alt: number; // ketinggian terbang di atas lereng (meter)
 }
 
 export interface Summary {
@@ -57,13 +70,7 @@ interface Rock {
   pts: number[][];
   dead: boolean;
 }
-interface Slab {
-  kind: 'slab';
-  x: number;
-  w: number;
-  seed: number;
-  dead: boolean;
-}
+
 interface Boulder {
   kind: 'boulder';
   x: number;
@@ -73,17 +80,14 @@ interface Boulder {
   dustT: number;
   dead: boolean;
 }
-type Obstacle = Rock | Slab | Boulder;
+
+type Obstacle = Rock | Boulder;
 
 interface Orb {
   x: number;
   y: number;
   taken: boolean;
   ph: number;
-}
-interface Gap {
-  x0: number;
-  x1: number;
 }
 
 interface Particle {
@@ -101,68 +105,48 @@ interface Particle {
   vr: number;
 }
 
+/** Naga yang dikendalikan pemain (terbang, tidak lagi berlari di tanah). */
 interface Player {
   x: number;
   y: number;
   vy: number;
-  onGround: boolean;
-  jumps: number;
-  coyote: number;
-  sliding: boolean;
-  slideT: number;
-  cut: boolean;
-  phase: number;
-  rot: number;
-  flip: number;
-  flipT: number;
-  spin: number;
-  wAir: number;
-  wSlide: number;
-  wDead: number;
-  land: number;
+  vx: number; // dipakai saat ragdoll/terhempas
+  pitch: number;
+  roll: number;
+  flap: number;
+  flapAmp: number;
+  bobT: number;
   dustT: number;
-  airTime: number;
-  stretch: number;
-  ragdollFlail: number;
+  spin: number;
+  dead: number;
+  landT: number; // sisa waktu efek "nyaris menabrak tanah"
 }
 
 interface Ghost {
   x: number;
   y: number;
-  rot: number;
-  flip: number;
-  view: RunnerView;
+  pitch: number;
+  view: DragonView;
   life: number;
 }
 
-const RIB_N = 15;
-const RIB_L = 11.5;
-const GHOST_LIFE = 0.3;
+const GHOST_LIFE = 0.28;
 
 function newPlayer(): Player {
   return {
     x: 0,
     y: 0,
     vy: 0,
-    onGround: true,
-    jumps: 1,
-    coyote: COYOTE,
-    sliding: false,
-    slideT: 0,
-    cut: true,
-    phase: 0,
-    rot: 0,
-    flip: 0,
-    flipT: -1,
-    spin: 0,
-    wAir: 0,
-    wSlide: 0,
-    wDead: 0,
-    land: 0,
+    vx: 0,
+    pitch: 0,
+    roll: 0,
+    flap: 0,
+    flapAmp: 0.6,
+    bobT: 0,
     dustT: 0,
-    airTime: 0,
-    stretch: 1,
-    ragdollFlail: 0,
+    spin: 0,
+    dead: 0,
+    landT: 0,
   };
 }
 
@@ -209,7 +193,7 @@ export class Game {
   state: GameState = 'menu';
   private time = 0;
   private p: Player = newPlayer();
-  private speed = 330;
+  private speed = 400;
   private camX = 0;
   private camY = 0;
   private tod = 0;
@@ -218,11 +202,9 @@ export class Game {
 
   private obstacles: Obstacle[] = [];
   private orbList: Orb[] = [];
-  private gaps: Gap[] = [];
   private events: number[] = [];
   private particles: Particle[] = [];
   private ghosts: Ghost[] = [];
-  private ribbon: { x: number; y: number }[] = [];
 
   private nextX = 1500;
   private lastEnd = 0;
@@ -230,15 +212,17 @@ export class Game {
   private spawning = false;
   private cleanT = 0;
 
-  private jumpHeld = false;
-  private slideHeld = false;
-  private jumpBuf = 0;
+  // Input: atas (naik) & bawah (turun) + panjer kilat
+  private upHeld = false;
+  private downHeld = false;
+  private boostHeld = false;
 
+  private flapSlow = 0;
+  private everInput = false;
   private orbs = 0;
-  private meter = 0;
+  private meter = 0.42;
   private boostT = 0;
   private boostK = 0;
-  private boostHeld = false;
   private boostHoldT = 0;
   private boostMult = 1.0;
   private camZoom = 1.0;
@@ -248,7 +232,7 @@ export class Game {
   private flash = 0;
   private fade = 0;
   private dyingT = 0;
-  private deathKind: 'hit' | 'fall' = 'hit';
+  private deathKind: 'ground' | 'hit' = 'hit';
   private ghostT = 0;
   private hudT = 0;
   private best = 0;
@@ -318,39 +302,58 @@ export class Game {
   pause() {
     if (this.state !== 'playing') return;
     this.state = 'paused';
-    this.jumpHeld = false;
-    this.slideHeld = false;
+    this.upHeld = false;
+    this.downHeld = false;
+    this.boostHeld = false;
     this.cb.onState('paused');
   }
 
   resume() {
     if (this.state !== 'paused') return;
     this.state = 'playing';
-    this.jumpBuf = 0;
     this.cb.onState('playing');
   }
 
-  jumpDown() {
+  /** Tombol Naik (W / panah atas / tahan layar). */
+  upDown() {
     this.sfx.init();
-    this.jumpHeld = true;
-    if (this.state === 'playing') this.jumpBuf = 0.12;
+    this.upHeld = true;
+    this.downHeld = false;
+    this.everInput = true;
   }
-  jumpUp() {
-    this.jumpHeld = false;
+  upUp() {
+    this.upHeld = false;
   }
-  slideDown() {
-    this.slideHeld = true;
+  /** Tombol Turun (S / panah bawah). */
+  downDown() {
+    this.downHeld = true;
+    this.upHeld = false;
+    this.everInput = true;
   }
-  slideUp() {
-    this.slideHeld = false;
+  downUp() {
+    this.downHeld = false;
   }
 
+  // Alias kompatibilitas (kontrol lama)
+  jumpDown() {
+    this.upDown();
+  }
+  jumpUp() {
+    this.upUp();
+  }
+  slideDown() {
+    this.downDown();
+  }
+  slideUp() {
+    this.downUp();
+  }
+
+  /** Kilat: dipakai di langit untuk melesat ngebut. */
   boostDown() {
+    this.sfx.init();
     this.boostHeld = true;
     if (this.state === 'playing') {
-      if (this.boostT <= 0 && this.meter >= 1) {
-        this.triggerBoost();
-      }
+      this.tryBoost();
     }
   }
 
@@ -362,22 +365,27 @@ export class Game {
     this.boostDown();
   }
 
-  private triggerBoost() {
-    if (this.state !== 'playing' || this.meter < 1) return;
+  private tryBoost() {
+    if (this.state !== 'playing' || this.boostT > 0) return;
+    if (this.meter < BOOST_MIN) {
+      this.sfx.deny();
+      return;
+    }
     const p = this.p;
-    this.boostT = BOOST_DUR;
+    this.boostT = this.meter / BOOST_DRAIN;
     this.boostHoldT = 0;
-    this.boostMult = 2.0;
-    this.flash = 0.85;
+    this.boostMult = BOOST_MULT_MIN;
+    this.flash = 0.8;
     this.shake = 14;
     this.sfx.boost();
     for (let i = 0; i < 4; i++) {
-      this.emit(p.x, p.y - 34, this.speed, 0, 0.6 + i * 0.12, 10 + i * 10, '#ffd84a', 3);
+      this.emit(p.x - 10, p.y - 20, -this.speed * 0.4 - i * 90, rand(-60, 60), 0.55 + i * 0.1, 9 + i * 9, '#ffd84a', 3);
     }
-    for (let i = 0; i < 22; i++) {
+    for (let i = 0; i < 26; i++) {
       const a = Math.random() * TAU;
-      this.emit(p.x, p.y - 34, this.speed + Math.cos(a) * 350, Math.sin(a) * 350, 0.5, 2.5, '#fff3a0', 1);
+      this.emit(p.x, p.y - 10, Math.cos(a) * 360 - this.speed * 0.3, Math.sin(a) * 300, 0.5, 2.4, '#fff3a0', 1);
     }
+    this.wingGust(14);
   }
 
   // ---------------------------------------------------------------- Dunia
@@ -388,24 +396,23 @@ export class Game {
 
   private resetWorld(play: boolean) {
     this.p = newPlayer();
-    this.p.y = groundY(0);
-    this.speed = play ? baseSpeed(0) : 330;
+    this.p.y = groundY(0) - 210;
+    this.p.vy = 0;
+    this.speed = play ? baseSpeed(0) : 400;
     this.camX = this.p.x - PSX;
-    this.camY = groundY(140);
+    this.camY = this.p.y;
     this.obstacles = [];
     this.orbList = [];
-    this.gaps = [];
     this.events = [];
     this.particles = [];
     this.ghosts = [];
-    this.ribbon = Array.from({ length: RIB_N }, (_, i) => ({ x: this.p.x - i * RIB_L, y: this.p.y - 57 }));
     this.nextX = 2200;
     this.lastEnd = 0;
     this.lastKind = '';
     this.spawning = play;
     this.cleanT = 0;
     this.orbs = 0;
-    this.meter = 0;
+    this.meter = 0.42;
     this.boostT = 0;
     this.boostK = 0;
     this.boostHeld = false;
@@ -419,25 +426,17 @@ export class Game {
     this.dyingT = 0;
     this.dist = 0;
     this.todDrift = 0;
-    this.jumpBuf = 0;
-    this.jumpHeld = false;
-    this.slideHeld = false;
+    this.upHeld = false;
+    this.downHeld = false;
+    this.flapSlow = 0;
+    this.everInput = false;
     if (play) {
       this.addOrbLine(700, 7, 42);
       this.addOrbLine(1400, 7, 42);
-      // Pre-spawn rintangan jauh di depan (hingga 4500px) sebelum pemain melangkah
       const initHorizon = this.p.x + 4500;
       let guard = 0;
       while (this.nextX < initHorizon && guard++ < 30) this.spawnPattern();
     }
-  }
-
-  private isGap(x: number): boolean {
-    for (let i = 0; i < this.gaps.length; i++) {
-      const g = this.gaps[i];
-      if (x > g.x0 && x < g.x1) return true;
-    }
-    return false;
   }
 
   private emit(
@@ -462,31 +461,53 @@ export class Game {
     }
   }
 
-  // ---------------------------------------------------------------- Pembangkit rintangan
-
-  private addOrbLine(x: number, n: number, sp: number, h = 28) {
+  /** Hembusan angin dari kepakan sayap naga. */
+  private wingGust(n: number) {
+    const p = this.p;
     for (let i = 0; i < n; i++) {
-      const wx = x + i * sp;
-      this.orbList.push({ x: wx, y: groundY(wx) - h - 5 * Math.sin(i * 0.7), taken: false, ph: Math.random() * TAU });
+      const a = Math.PI + rand(-0.7, 0.9);
+      const sp = rand(120, 340);
+      this.emit(
+        p.x + rand(-16, 10),
+        p.y - 22 + rand(-14, 14),
+        Math.cos(a) * sp - this.speed * 0.25,
+        Math.sin(a) * sp * 0.5 + rand(-40, 40),
+        rand(0.25, 0.5),
+        rand(1.4, 2.6),
+        'rgba(255,250,225,0.75)',
+        1,
+      );
     }
   }
 
+  // ---------------------------------------------------------------- Pembangkit rintangan
+
+  private addOrbLine(x: number, n: number, sp: number) {
+    for (let i = 0; i < n; i++) {
+      const wx = x + i * sp;
+      // melayang di langit (bergelombang lembut) supaya pemain bermanuver naik-turun
+      const h = 150 + 70 * Math.sin(i * 0.55 + x * 0.0016) + rand(-12, 12);
+      this.orbList.push({ x: wx, y: groundY(wx) - h, taken: false, ph: Math.random() * TAU });
+    }
+  }
+
+  /** Busur orb di atas rintangan (harus dilewati dengan terbang tinggi). */
   private addArc(cx: number, s: number, peak: number, count: number) {
-    const half = s * 0.3;
-    const pk = Math.min(peak, 105);
+    const half = s * 0.34;
+    const pk = Math.min(peak, 190);
     for (let i = 0; i < count; i++) {
       const u = i / (count - 1);
       const wx = cx - half + 2 * half * u;
-      const hh = 30 + pk * Math.sin(Math.PI * u);
+      const hh = 96 + pk * Math.sin(Math.PI * u);
       this.orbList.push({ x: wx, y: groundY(wx) - hh, taken: false, ph: Math.random() * TAU });
     }
   }
 
-  private placeRock(x: number, s: number): number {
-    const w = rand(46, 70);
-    const h = rand(30, 62);
+  private placeRock(x: number, s: number, tall = false, spire = false): number {
+    const w = spire ? rand(44, 66) : rand(46, 74);
+    const h = spire ? rand(190, 320) : tall ? rand(96, 168) : rand(28, 62);
     this.obstacles.push({ kind: 'rock', x, w, h, pts: makeRockPts(), dead: false });
-    this.addArc(x + w / 2, s, 40 + h * 0.9, 5);
+    this.addArc(x + w / 2, s, 40 + h * 0.85, tall ? 7 : 5);
     return x + w;
   }
 
@@ -496,7 +517,7 @@ export class Game {
     let maxH = 0;
     for (let i = 0; i < n; i++) {
       const w = rand(40, 58);
-      const h = rand(26, 42);
+      const h = rand(26, 52);
       maxH = Math.max(maxH, h);
       this.obstacles.push({ kind: 'rock', x: cx, w, h, pts: makeRockPts(), dead: false });
       cx += w - 8;
@@ -505,40 +526,31 @@ export class Game {
     return cx;
   }
 
-  private placeChasm(x: number, s: number): number {
-    const gw = clamp(s * rand(0.3, 0.43), 110, 340);
-    this.gaps.push({ x0: x, x1: x + gw });
-    this.addArc(x + gw / 2, s, 70, 7);
-    return x + gw;
-  }
-
-  private placeSlab(x: number, _s: number): number {
-    const w = rand(125, 150);
-    this.obstacles.push({ kind: 'slab', x, w, seed: Math.random() * 1000, dead: false });
-    const n = 4;
-    for (let i = 0; i < n; i++) {
-      const wx = x + 24 + (i * (w - 48)) / (n - 1);
-      this.orbList.push({ x: wx, y: groundY(wx) - 20, taken: false, ph: Math.random() * TAU });
-    }
-    return x + w;
-  }
-
   private placeCombo(x: number, s: number): number {
-    const t = Math.floor(Math.random() * 4);
-    const gx = s * rand(0.84, 0.98);
+    const t = Math.floor(Math.random() * 3);
+    const gx = s * rand(0.9, 1.1);
     let e: number;
     if (t === 0) {
       e = this.placeRock(x, s);
-      e = this.placeRock(e + gx, s);
+      e = this.placeRock(e + gx, s, true);
     } else if (t === 1) {
-      e = this.placeChasm(x, s);
+      e = this.placeRock(x, s, true);
       e = this.placeRock(e + gx, s);
-    } else if (t === 2) {
-      e = this.placeRock(x, s);
-      e = this.placeSlab(e + gx, s);
     } else {
-      e = this.placeSlab(x, s);
-      e = this.placeRock(e + gx, s);
+      e = this.placeCluster(x, s);
+      e = this.placeRock(e + gx, s, true);
+    }
+    return e;
+  }
+
+  /** Menara batu menjulang: memaksa pemain bermanuver di langit. */
+  private placeSpire(x: number, s: number): number {
+    const e = this.placeRock(x, s, false, true);
+    // orb melingkar di puncak menara (hadiah bagi yang berani terbang tinggi)
+    const cx = x + (e - x) / 2;
+    for (let i = 0; i < 4; i++) {
+      const t = i / 3;
+      this.orbList.push({ x: cx - 18 + t * 36, y: groundY(cx) - 340 - 20 * Math.sin(Math.PI * t), taken: false, ph: Math.random() * TAU });
     }
     return e;
   }
@@ -551,8 +563,8 @@ export class Game {
     const opts: [string, number][] = [
       ['rock', 5],
       ['cluster', m > 110 ? 3 : 0],
-      ['chasm', m > 45 ? 4 : 0],
-      ['slab', m > 160 ? 3.5 : 0],
+      ['tower', m > 60 ? 3.0 : 0],
+      ['spire', m > 220 ? 2.6 : 0],
       ['boulder', m > 420 ? 2.2 : 0],
       ['combo', m > 800 ? 3 : 0],
       ['orbs', 1.2],
@@ -582,11 +594,11 @@ export class Game {
       case 'cluster':
         end = this.placeCluster(x, s);
         break;
-      case 'chasm':
-        end = this.placeChasm(x, s);
+      case 'tower':
+        end = this.placeRock(x, s, true);
         break;
-      case 'slab':
-        end = this.placeSlab(x, s);
+      case 'spire':
+        end = this.placeSpire(x, s);
         break;
       case 'boulder': {
         const trig = this.lastEnd + 300;
@@ -606,7 +618,7 @@ export class Game {
     }
     this.lastEnd = end;
     const ease = clamp(1 - m / 600, 0, 1);
-    const rest = s * (1.02 - 0.32 * d) * rand(0.9, 1.4) * (1 + 0.4 * ease);
+    const rest = s * (1.05 - 0.3 * d) * rand(0.9, 1.4) * (1 + 0.4 * ease);
     this.nextX = end + rest;
     if (kind !== 'orbs' && kind !== 'boulder' && Math.random() < 0.55) {
       const n = Math.floor((rest * 0.5) / 40);
@@ -616,8 +628,7 @@ export class Game {
 
   private spawnBoulder() {
     const p = this.p;
-    // Spawn batu menggelinding SANGAT JAUH di luar pandangan kamera (minimal 2400px di depan pemain)
-    const farAhead = Math.max(2400, (W / Math.min(0.42, this.camZoom)) + 1500);
+    const farAhead = Math.max(2400, W / Math.min(0.42, this.camZoom) + 1500);
     this.obstacles.push({
       kind: 'boulder',
       x: p.x + farAhead + rand(100, 300),
@@ -648,12 +659,7 @@ export class Game {
       }
       if (n >= 8) this.acc = 0;
     }
-    this.sfx.update(
-      dt,
-      clamp(this.speed / 1100, 0, 1),
-      this.state === 'playing' || this.state === 'menu',
-      clamp(this.speed / 1100, 0, 1),
-    );
+    this.sfx.update(dt, clamp(this.speed / 1100, 0, 1), this.state === 'playing' || this.state === 'menu', clamp(this.speed / 1100, 0, 1));
     this.render();
 
     this.hudT += dt;
@@ -670,8 +676,9 @@ export class Game {
       orbs: this.orbs,
       meter: this.meter,
       boosting: this.boostT > 0,
-      ready: this.meter >= 1 && this.boostT <= 0,
+      ready: this.meter >= BOOST_MIN && this.boostT <= 0,
       boostMult: this.boostT > 0 ? Math.round(this.boostMult * 10) / 10 : 1,
+      alt: Math.max(0, Math.round((groundY(this.p.x) - this.p.y) / PX_PER_M)),
     });
   }
 
@@ -699,193 +706,207 @@ export class Game {
 
   private stepMenu(dt: number) {
     const p = this.p;
-    this.speed = 330;
+    this.speed = 400;
     p.x += this.speed * dt;
-    p.y = groundY(p.x);
-    p.onGround = true;
+    const target = groundY(p.x + 240) - 155;
+    p.y += (target - p.y) * Math.min(1, dt * 2.2);
+    // naga terbang santai di layar menu: moncong naik-turun lembut mengikuti lereng
+    const want = clamp((target - p.y) * -0.004, -0.22, 0.22) + 0.05 * Math.sin(this.time * 0.9);
+    p.pitch += (want - p.pitch) * Math.min(1, dt * 3);
+    p.roll = 0.07 * Math.sin(this.time * 0.8);
+    p.flapAmp = 0.72 + 0.22 * Math.sin(this.time * 0.6);
+    p.flap += dt * 7.6;
     this.dist = p.x / PX_PER_M;
   }
 
-  private groundDist(): number {
-    const p = this.p;
-    return this.isGap(p.x) ? 999 : groundY(p.x) - p.y;
-  }
+  // ---------------------------------------------------------------- Terbang
 
-  private doJump() {
+  private stepBoost(dt: number): boolean {
     const p = this.p;
-    p.vy = -JUMP_V;
-    p.onGround = false;
-    p.jumps = 1;
-    p.coyote = 0;
-    p.sliding = false;
-    p.cut = false;
-    p.airTime = 0;
-    p.stretch = 1.28;
-    p.ragdollFlail = Math.random() * Math.PI * 2;
-    this.jumpBuf = 0;
-    this.sfx.jump();
-    this.dustBurst(p.x, p.y, 6);
-  }
-
-  private doAirJump() {
-    const p = this.p;
-    p.vy = -JUMP_V * 0.9;
-    p.jumps = 0;
-    p.cut = true;
-    p.flipT = 0;
-    p.airTime = 0;
-    p.stretch = 1.34;
-    p.ragdollFlail = Math.random() * Math.PI * 2;
-    this.jumpBuf = 0;
-    this.sfx.airJump();
-    this.emit(p.x, p.y - 30, this.speed, 0, 0.45, 8, '#ffe27a', 3);
-    for (let i = 0; i < 10; i++) {
-      const a = Math.random() * TAU;
-      this.emit(p.x, p.y - 30, this.speed + Math.cos(a) * 220, Math.sin(a) * 220, 0.4, 2.2, '#fff3b0', 1);
-    }
-  }
-
-  private land(g: number) {
-    const p = this.p;
-    const impact = p.vy;
-    p.onGround = true;
-    p.airTime = 0;
-    p.stretch = 1.0;
-    p.y = g;
-    p.vy = 0;
-    p.jumps = 1;
-    p.land = Math.min(1.4, 0.6 + impact / 500);
-    p.flipT = -1;
-    p.flip = 0;
-    p.cut = false;
-    const slope = slopeAt(p.x);
-    if (slope > 0.08 && impact > 80) {
-      // Sandboard downslope carving: pertahankan momentum & dorongan kecepatan
-      const boostGain = Math.min(85, impact * 0.09 * slope);
-      this.speed = Math.min(1100, this.speed + boostGain);
-      if (this.boostT <= 0 && this.meter < 1) {
-        this.meter = Math.min(1, this.meter + 0.025);
+    if (this.boostT > 0) {
+      this.boostT -= dt;
+      if (this.boostHeld) {
+        this.boostHoldT += dt;
+        const ramp = clamp(this.boostHoldT / BOOST_RAMP, 0, 1);
+        this.boostMult = BOOST_MULT_MIN + (BOOST_MULT_MAX - BOOST_MULT_MIN) * ramp;
+        if (this.boostMult > 3.0) this.shake = Math.max(this.shake, (this.boostMult - 3.0) * 1.6);
+      } else {
+        this.boostHoldT = Math.max(0, this.boostHoldT - dt * 1.2);
+        this.boostMult = Math.max(BOOST_MULT_MIN, this.boostMult - dt * 2.2);
       }
+      this.meter = clamp(this.boostT * BOOST_DRAIN, 0, 1);
+      if (this.boostT <= 0) {
+        this.boostT = 0;
+        this.meter = 0;
+        this.boostHoldT = 0;
+        this.boostMult = 1.0;
+        this.invuln = 1.1;
+        // naga mendongak lembut setelah kilat padam
+        p.vy = Math.min(p.vy, -430);
+        this.sfx.boostEnd();
+        this.wingGust(10);
+      }
+      void p;
+      return this.boostT > 0;
     }
-    if (impact > 260) {
-      this.sfx.land();
-      this.dustBurst(p.x, g, 8);
-      this.shake = Math.max(this.shake, Math.min(7, impact * 0.007));
-    }
+    this.boostHoldT = 0;
+    this.boostMult = 1.0;
+    this.meter = Math.min(1, this.meter + BOOST_REGEN * dt);
+    return false;
   }
 
   private stepPlay(dt: number) {
     const p = this.p;
     this.dist = Math.max(0, p.x) / PX_PER_M;
     if (this.invuln > 0) this.invuln -= dt;
+    // Sisa kebal setelah kilat padam: naga dituntun naik lembut agar adil
+    const boostTail = this.boostT <= 0 && this.invuln > 0 && this.state === 'playing';
+    if (p.landT > 0) p.landT -= dt;
 
-    // ---- Kilat
-    if (this.boostT > 0) {
-      this.boostT -= dt;
-      this.meter = clamp(this.boostT / BOOST_DUR, 0, 1);
+    // ---- Kilat (di langit, bukan di tanah)
+    const boosting = this.stepBoost(dt);
 
-      if (this.boostHeld) {
-        // Pemain men-panjer tombol boost: semakin lama semakin cepat hingga 5x!
-        this.boostHoldT += dt;
-        // Mencapai 5x lipat kecepatan dalam ~3 detik menahan panjer
-        const ramp = clamp(this.boostHoldT / 3.0, 0, 1);
-        this.boostMult = 2.0 + 3.0 * ramp;
-        if (this.boostMult > 3.0) {
-          this.shake = Math.max(this.shake, (this.boostMult - 3.0) * 1.5);
-        }
-      } else {
-        // Jika dilepas dari panjer, kecepatan perlahan meluncur kembali ke 2.0x
-        this.boostHoldT = Math.max(0, this.boostHoldT - dt * 1.2);
-        this.boostMult = Math.max(2.0, this.boostMult - dt * 1.8);
-      }
-
-      if (this.boostT <= 0) {
-        if (this.isGap(p.x - 70) || this.isGap(p.x) || this.isGap(p.x + 90)) {
-          this.boostT = 0.02;
-        } else {
-          this.boostT = 0;
-          this.meter = 0;
-          this.boostHoldT = 0;
-          this.boostMult = 1.0;
-          this.invuln = 0.9;
-        }
-      }
-    } else {
-      this.boostHoldT = 0;
-      this.boostMult = 1.0;
-    }
-    const boosting = this.boostT > 0;
-
-    // ---- Kecepatan
-    const slope = slopeAt(p.x);
-    const slideBonus = (p.sliding && slope > 0.02) ? slope * 0.45 : 0;
-    const mod2 = 1 + clamp(slope * 0.55 + slideBonus, -0.16, 0.35);
-    // Saat boost, kecepatan meningkat bertahap hingga 5x bila dipanjer!
-    const target = baseSpeed(this.dist) * mod2 * (boosting ? this.boostMult : 1);
-    const acc = boosting ? (this.boostHeld ? 3600 : 2600) : 550;
+    // ---- Kecepatan maju
+    const target = baseSpeed(this.dist) * (boosting ? this.boostMult : 1);
+    const acc = boosting ? (this.boostHeld ? 3800 : 2600) : this.speed > target ? 1250 : 560;
     this.speed += clamp(target - this.speed, -acc * dt, acc * dt);
 
-    // ---- Input lompat
-    if (this.jumpBuf > 0) {
-      this.jumpBuf -= dt;
-      if (p.onGround || p.coyote > 0) this.doJump();
-      else if (p.jumps > 0 && this.groundDist() > 50) this.doAirJump();
+    // ---- Rahmat pembuka: sebelum pemain menyentuh tombol, naga menjaga ketinggian
+    // supaya pemula tidak langsung jatuh menyerempet lereng.
+    const graceTarget = groundY(p.x + 210) - 255;
+    if (!this.everInput) {
+      if (p.y > graceTarget + 12) p.vy -= CLIMB_ACC * 0.85 * dt;
+      else if (p.y < graceTarget - 30) p.vy += DIVE_ACC * 0.55 * dt;
+      else p.vy *= Math.max(0, 1 - 4.5 * dt);
+    }
+
+    // ---- Manuver naik / turun (model kecepatan-target: halus & tidak menyentak)
+    const climb = this.upHeld;
+    const dive = this.downHeld;
+    const prevVy = p.vy;
+    const slope = slopeAt(p.x);
+    let targetVy: number;
+    let vAcc: number;
+    if (climb) {
+      targetVy = -CLIMB_V * (boosting ? 1.15 : 1);
+      vAcc = CLIMB_ACC;
+    } else if (dive) {
+      targetVy = DIVE_V * (boosting ? 1.1 : 1);
+      vAcc = DIVE_ACC;
+    } else {
+      // Meluncur: mengikuti turunan lereng + sisa turun yang sangat lembut
+      targetVy = slope * this.speed + SINK_V;
+      vAcc = GLIDE_ACC;
+    }
+    p.vy += clamp(targetVy - p.vy, -vAcc * dt, vAcc * dt);
+
+    // ---- Saat kilat menyala: naga otomatis terangkat dari lereng
+    const alt = groundY(p.x) - p.y;
+    if (boostTail) {
+      const k = smooth(clamp((BOOST_FLOOR * 1.15 - alt) / (BOOST_FLOOR * 1.15), 0, 1));
+      if (k > 0.001) {
+        p.vy -= CLIMB_ACC * 1.25 * k * dt;
+        if (p.vy > 0) p.vy *= Math.max(0, 1 - 3.6 * k * dt);
+      }
+    }
+    if (boosting) {
+      const k = smooth(clamp((BOOST_FLOOR - alt) / BOOST_FLOOR, 0, 1));
+      if (k > 0.001) {
+        p.vy -= CLIMB_ACC * 1.15 * k * dt;
+        if (p.vy > 0) p.vy *= Math.max(0, 1 - 3.2 * k * dt);
+      }
+    }
+
+    // ---- Batas ketinggian langit (halus, memantul lembut ke bawah)
+    const soft = MAX_ALT - ALT_SOFT;
+    if (alt > soft) {
+      const k = smooth(clamp((alt - soft) / ALT_SOFT, 0, 1));
+      p.vy += LIFT * 1.4 * k * dt;
+      if (k > 0.5) p.vy = Math.max(p.vy, SINK_V * 0.15);
     }
 
     // ---- Gerak
-    if (p.onGround) {
-      p.x += this.speed * dt;
-      p.y = groundY(p.x);
-      p.coyote = COYOTE;
-      p.airTime = 0;
-      if (!boosting && this.isGap(p.x)) {
-        p.onGround = false;
-        p.vy = 0;
-        p.sliding = false;
-      } else {
-        if (this.slideHeld && !p.sliding) {
-          p.sliding = true;
-          p.slideT = 0;
-          this.sfx.slide();
-        }
-        if (p.sliding) {
-          p.slideT += dt;
-          if (!this.slideHeld && p.slideT > 0.3) p.sliding = false;
-        }
-      }
-    } else {
-      p.coyote = Math.max(0, p.coyote - dt);
-      p.sliding = false;
-      p.airTime += dt;
-      // Kemiringan ragdoll fluid dinamis saat meluncur di udara
-      const targetRot = clamp(p.vy * 0.00045, -0.32, 0.42);
-      p.rot += (targetRot - p.rot) * Math.min(1, dt * 10);
-      const targetStretch = p.vy < -200 ? 1.16 : p.vy > 400 ? 0.92 : 1.0;
-      p.stretch += (targetStretch - p.stretch) * Math.min(1, dt * 8);
+    p.x += this.speed * dt;
+    p.y += p.vy * dt;
+    const g = groundY(p.x);
+    if (alt > MAX_ALT) p.y = g - MAX_ALT;
 
-      if (this.slideHeld) p.vy += 3600 * dt;
-      p.vy = Math.min(p.vy + GRAVITY * dt, 1400);
-      if (!this.jumpHeld && !p.cut && p.vy < -JUMP_CUT) {
-        p.vy = -JUMP_CUT;
-        p.cut = true;
-      }
-      p.x += this.speed * dt;
-      p.y += p.vy * dt;
-      const g = groundY(p.x);
-      const solid = boosting || !this.isGap(p.x);
-      if (solid && p.y >= g && p.vy >= 0) {
-        const nearChasmWall = this.gaps.some((gp) => Math.abs(p.x - gp.x1) < 42 && p.y > g + 22);
-        if (!boosting && nearChasmWall) this.die('wall');
-        else this.land(g);
-      }
-      if (this.state === 'playing' && p.y > g + 380) this.die('fall');
+    // ---- Orientasi badan mengikuti arah terbang
+    const vRef = climb ? p.vy - 190 : dive ? p.vy + 150 : p.vy;
+    const targetPitch = clamp(Math.atan2(vRef, this.speed * 0.72), -0.62, 0.86);
+    p.pitch += (targetPitch - p.pitch) * (1 - Math.exp(-dt * 8.5));
+    const targetRoll = clamp(p.pitch * 0.42 + (boosting ? -0.05 : 0), -0.42, 0.42);
+    p.roll += (targetRoll - p.roll) * (1 - Math.exp(-dt * 6));
+
+    // ---- Kepakan sayap: makin kuat saat menanjak / ngebut
+    const effort = clamp((prevVy - p.vy) * 0.0016, 0, 0.5) + (climb ? 0.55 : 0) + Math.abs(p.vy) / 2600 + (boosting ? 0.3 : 0);
+    const targetAmp = clamp(0.5 + effort, 0.35, 1.5);
+    p.flapAmp += (targetAmp - p.flapAmp) * (1 - Math.exp(-dt * 6));
+    const flapRate = climb ? 11.5 : dive ? 7.5 : 8.4;
+    p.flap += dt * flapRate * (boosting ? 1.2 : 1);
+    p.bobT += dt;
+
+    this.flapSlow += dt;
+    if (this.flapSlow > (climb ? 0.2 : 0.4)) {
+      this.flapSlow = 0;
+      this.wingGust(climb ? 4 : 2);
+      if (climb && this.state === 'playing') this.sfx.flap();
     }
-    if (this.state !== 'playing') return;
+
+    // ---- Angin & debu dekat tanah
+    const height = g - p.y;
+    if (height < 130) {
+      p.dustT -= dt;
+      if (p.dustT <= 0) {
+        p.dustT = 0.05;
+        const gy = g;
+        this.emit(p.x - rand(0, 90), gy - 2, -rand(30, 160), -rand(20, 130), rand(0.3, 0.6), rand(3, 7), this.dustCss, 0);
+      }
+    }
+    if (boosting) {
+      for (let i = 0; i < 2; i++) {
+        this.emit(
+          p.x - rand(10, 60),
+          p.y - rand(0, 44),
+          -rand(120, 420),
+          rand(-90, 90),
+          rand(0.16, 0.32),
+          rand(1.4, 2.6),
+          Math.random() < 0.5 ? '#ffd84a' : '#fffbe0',
+          1,
+        );
+      }
+      this.ghostT -= dt;
+      if (this.ghostT <= 0) {
+        this.ghostT = 0.07;
+        this.ghosts.push({ x: p.x, y: p.y, pitch: p.pitch, view: this.dragonView(), life: GHOST_LIFE });
+      }
+    }
+
+    // ---- Kontak dengan lereng
+    // Menukik keras = menabrak. Menyerempet pelan = meluncur (skid) lalu memantul halus.
+    if (height <= BELLY) {
+      p.y = g - BELLY;
+      if (boosting || boostTail || this.invuln > 0) {
+        p.vy = Math.min(p.vy, -520);
+      } else if (p.vy > SLAM_V) {
+        this.die('ground');
+        return;
+      } else {
+        // skid: kehilangan sedikit kecepatan, debu beterbangan, lalu terangkat lagi
+        const hard = clamp(p.vy / SLAM_V, 0, 1);
+        this.speed = Math.max(baseSpeed(this.dist) * 0.72, this.speed - (30 + 120 * hard));
+        p.vy = -(110 + 130 * hard);
+        this.shake = Math.max(this.shake, 3 + 6 * hard);
+        this.dustBurst(p.x, g, 5 + Math.round(6 * hard));
+        this.sfx.land();
+        if (!boosting) this.meter = Math.max(0, this.meter - 0.05);
+      }
+    }
 
     // ---- Spawn & peristiwa
     if (this.spawning) {
-      // Jarak horizon spawn minimal 3500px - 4500px jauh di luar batas kamera
-      const viewMargin = (W / Math.min(0.42, this.camZoom)) + 600;
+      const viewMargin = W / Math.min(0.42, this.camZoom) + 600;
       const horizon = this.camX + viewMargin + 3500;
       let guard = 0;
       while (this.nextX < horizon && guard++ < 20) this.spawnPattern();
@@ -899,7 +920,6 @@ export class Game {
         const cut = p.x - PSX - 1200;
         this.obstacles = this.obstacles.filter((o) => !o.dead && o.x > cut - 600);
         this.orbList = this.orbList.filter((o) => !o.taken && o.x > cut);
-        this.gaps = this.gaps.filter((g) => g.x1 > cut);
       }
     }
 
@@ -917,16 +937,15 @@ export class Game {
       }
     }
 
-    // ---- Tabrakan
-    const hitH = p.sliding ? 36 : 66;
+    // ---- Tabrakan rintangan
     const invincible = boosting || this.invuln > 0;
     for (const o of this.obstacles) {
       if (o.dead) continue;
       const cx = o.kind === 'boulder' ? o.x : o.x + o.w / 2;
-      if (Math.abs(cx - p.x) > 220) continue;
-      if (!this.hits(o, hitH)) continue;
+      if (Math.abs(cx - p.x) > 240) continue;
+      if (!this.hits(o)) continue;
       if (invincible) {
-        if (o.kind !== 'slab') this.smash(o);
+        this.smash(o);
       } else {
         this.die('hit');
         return;
@@ -934,20 +953,21 @@ export class Game {
     }
 
     // ---- Orb
-    const bodyY = p.y - (p.sliding ? 16 : 34);
-    const rad = boosting ? 130 : 32;
+    const bodyX = p.x + 2;
+    const bodyY = p.y - 3;
+    const rad = boosting ? 150 : 34;
     for (const o of this.orbList) {
       if (o.taken) continue;
-      if (o.x < p.x - 160 || o.x > p.x + 180) continue;
-      if (Math.hypot(o.x - (p.x + 4), o.y - bodyY) < rad) {
+      if (o.x < p.x - 170 || o.x > p.x + 190) continue;
+      if (Math.hypot(o.x - bodyX, o.y - bodyY) < rad) {
         o.taken = true;
         this.orbs++;
-        if (!boosting && this.meter < 1) {
+        if (boosting) {
+          // saat kilat menyala, orb MENAHAN durasi kilat (tidak bisa melebihi durasi penuh)
+          this.boostT = Math.min(this.boostT + 0.09, 1 / BOOST_DRAIN);
+          this.meter = clamp(this.boostT * BOOST_DRAIN, 0, 1);
+        } else {
           this.meter = Math.min(1, this.meter + ORB_GAIN);
-        } else if (boosting) {
-          // Mengambil orb saat boost memperpanjang durasi boost
-          this.boostT = Math.min(BOOST_DUR, this.boostT + 0.8);
-          this.meter = clamp(this.boostT / BOOST_DUR, 0, 1);
         }
         this.sfx.orb();
         for (let i = 0; i < 7; i++) {
@@ -958,32 +978,43 @@ export class Game {
     }
   }
 
-  private hits(o: Obstacle, hitH: number): boolean {
-    const p = this.p;
-    if (o.kind === 'rock') {
-      for (const dx of [-HIT_W, 0, HIT_W]) {
-        const sx = p.x + dx;
-        const u = (sx - o.x) / o.w;
-        if (u < 0 || u > 1) continue;
-        const top = groundY(sx) - o.h * rockProfile(o.pts, u) * 0.92;
-        if (p.y > top + 7) return true;
-      }
-      return false;
+  /**
+   * Tabrakan naga terhadap rintangan.
+   * - Batu: uji lingkaran tubuh naga terhadap profil permukaan batu (akurat).
+   * - Batu menggelinding: uji lingkaran lawan lingkaran.
+   */
+  /** Apakah lingkaran (cx,cy,r) menembus permukaan batu? */
+  private circleHitsRock(cx: number, cy: number, r: number, o: Rock): boolean {
+    const n = 5;
+    for (let i = 0; i < n; i++) {
+      const dx = -r + (2 * r * i) / (n - 1);
+      const sx = cx + dx;
+      const u = (sx - o.x) / o.w;
+      if (u < 0 || u > 1) continue;
+      const top = groundY(sx) - o.h * rockProfile(o.pts, u);
+      const yAt = cy + Math.sqrt(Math.max(0, r * r - dx * dx));
+      if (yAt > top) return true;
     }
-    if (o.kind === 'slab') {
-      if (p.x + HIT_W > o.x + 4 && p.x - HIT_W < o.x + o.w - 4) {
-        const g = groundY(p.x);
-        const head = p.y - hitH;
-        const topY = groundY(o.x + o.w / 2) - ARCH_H;
-        if (head < g - TUNNEL && p.y > topY) return true;
-      }
+    return false;
+  }
+
+  private hits(o: Obstacle): boolean {
+    const p = this.p;
+    const big = p.dead > 0.5 ? 4 : 0;
+    // dua lingkaran: badan & moncong naga (moncong sedikit lebih kecil)
+    const circles: [number, number, number][] = [
+      [p.x + 1, p.y - 4, BODY_R + big],
+      [p.x + NOSE * 0.5, p.y - 1, BODY_R * 0.74 + big],
+    ];
+    if (o.kind === 'rock') {
+      for (const [cx, cy, r] of circles) if (this.circleHitsRock(cx, cy, r, o)) return true;
       return false;
     }
     const by = groundY(o.x) - o.r;
-    const y0 = p.y - hitH + 8;
-    const y1 = p.y - 3;
-    const cy = clamp(by, y0, y1);
-    return Math.hypot(o.x - p.x, by - cy) < o.r + 6;
+    for (const [cx, cy, r] of circles) {
+      if (Math.hypot(o.x - cx, by - cy) < o.r + r) return true;
+    }
+    return false;
   }
 
   private smash(o: Obstacle) {
@@ -992,7 +1023,7 @@ export class Game {
     this.sfx.smash();
     this.shake = Math.max(this.shake, 6);
     const cx = o.kind === 'boulder' ? o.x : o.x + o.w / 2;
-    const cy = groundY(cx) - (o.kind === 'rock' ? o.h * 0.5 : o.kind === 'boulder' ? o.r : 20);
+    const cy = groundY(cx) - (o.kind === 'rock' ? o.h * 0.5 : o.r);
     for (let i = 0; i < 14; i++) {
       this.emit(
         cx + rand(-10, 10),
@@ -1012,41 +1043,35 @@ export class Game {
     }
   }
 
-  private die(kind: 'hit' | 'wall' | 'fall') {
+  private die(kind: 'ground' | 'hit') {
     if (this.state !== 'playing') return;
     const p = this.p;
     this.state = 'dying';
     this.dyingT = 0;
     this.boostT = 0;
     this.meter = 0;
-    p.sliding = false;
-    this.jumpBuf = 0;
-    if (kind === 'wall') {
-      const g = this.gaps.find((gp) => p.x >= gp.x1 - 1 && p.x <= gp.x1 + 60);
-      if (g) p.x = g.x1 - 8;
-      this.speed = Math.min(this.speed, 260);
-      this.deathKind = 'fall';
+    p.dead = 0;
+    this.deathKind = kind;
+    if (kind === 'ground') {
       this.sfx.crash();
-      this.shake = 12;
-      p.spin = 4;
-      p.vy = Math.max(p.vy, 0);
-    } else if (kind === 'fall') {
-      this.deathKind = 'fall';
-      this.sfx.fall();
-      this.shake = 3;
-      p.spin = 2.5;
+      this.shake = 16;
+      this.flash = 0.35;
+      p.spin = 2.6;
+      p.vy = -260;
+      p.vx = this.speed * 0.55;
+      this.dustBurst(p.x, p.y + BELLY, 16);
     } else {
-      this.deathKind = 'hit';
+      this.sfx.smash();
       this.sfx.crash();
-      this.shake = 18;
-      this.flash = 0.4;
-      p.vy = -420;
-      p.onGround = false;
-      p.spin = 8;
+      this.shake = 20;
+      this.flash = 0.45;
+      p.spin = 5.5;
+      p.vy = -430;
+      p.vx = this.speed * 0.3;
       for (let i = 0; i < 12; i++) {
         this.emit(
           p.x + 10,
-          p.y - rand(5, 50),
+          p.y - rand(5, 40),
           this.speed * 0.3 + rand(-120, 200),
           -rand(100, 450),
           0.8,
@@ -1059,7 +1084,7 @@ export class Game {
       }
       for (let i = 0; i < 12; i++) {
         const a = Math.random() * TAU;
-        this.emit(p.x + 10, p.y - 34, Math.cos(a) * 300, Math.sin(a) * 300, 0.4, 2, '#ffd84a', 1);
+        this.emit(p.x + 10, p.y - 20, Math.cos(a) * 300, Math.sin(a) * 300, 0.4, 2, '#ffd84a', 1);
       }
     }
     this.cb.onState('dying');
@@ -1068,27 +1093,29 @@ export class Game {
   private stepDying(dt: number) {
     const p = this.p;
     this.dyingT += dt;
-    const decel = this.deathKind === 'fall' ? 450 : 1500;
-    this.speed = Math.max(0, this.speed - decel * dt);
-    p.x += this.speed * dt;
-    p.vy = Math.min(p.vy + GRAVITY * dt, 1600);
+    p.dead = Math.min(1, p.dead + dt * 3.4);
+    this.speed = Math.max(0, this.speed - (this.deathKind === 'ground' ? 900 : 1400) * dt);
+    p.x += p.vx * dt;
+    p.vx = Math.max(0, p.vx - 420 * dt);
+    p.vy = Math.min(p.vy + LIFT * dt, 1500);
     p.y += p.vy * dt;
-    p.flip += p.spin * dt;
-    if (this.deathKind === 'hit' && !this.isGap(p.x)) {
-      const g = groundY(p.x);
-      if (p.y >= g) {
-        p.y = g;
-        if (p.vy > 160) {
-          p.vy = -p.vy * 0.3;
-          this.dustBurst(p.x, g, 4);
-        } else {
-          p.vy = 0;
-          p.onGround = true;
-        }
-        p.spin *= Math.exp(-dt * 3);
+    p.pitch += (clamp(Math.atan2(p.vy, Math.max(60, p.vx)), -1, 1.25) - p.pitch) * Math.min(1, dt * 6);
+    p.roll += (p.roll + p.spin * dt * 0.35) * 0 + dt * p.spin * 0.3;
+    p.flapAmp = Math.max(0, p.flapAmp - dt * 2.4);
+
+    const g = groundY(p.x);
+    if (p.y + BELLY >= g) {
+      p.y = g - BELLY;
+      if (p.vy > 150) {
+        p.vy = -p.vy * 0.32;
+        this.dustBurst(p.x, g, 5);
+        this.sfx.land();
+      } else {
+        p.vy = 0;
       }
+      p.spin *= Math.exp(-dt * 2.4);
     }
-    if (this.dyingT > (this.deathKind === 'fall' ? 1.0 : 1.3)) this.finish();
+    if (this.dyingT > 1.5) this.finish();
   }
 
   private finish() {
@@ -1109,54 +1136,21 @@ export class Game {
 
   private stepCommon(dt: number) {
     const p = this.p;
-    const dead = this.state === 'dying' || this.state === 'over';
 
     this.tod = this.dist / 650 + this.todDrift;
 
-    // bobot pose
-    const k = 1 - Math.exp(-dt * 16);
-    p.wAir += (!p.onGround && !dead ? 1 - p.wAir : -p.wAir) * k;
-    p.wSlide += (p.sliding && !dead ? 1 - p.wSlide : -p.wSlide) * k;
-    p.wDead += (dead ? 1 - p.wDead : -p.wDead) * k;
-    p.land = Math.max(0, p.land - dt * 5);
-
-    // fase lari
-    if (!dead) {
-      p.phase += dt * (p.onGround ? 13 + this.speed * 0.013 * (1 + this.boostK * 0.35) : 6);
-    }
-
-    // salto di udara
-    if (!dead && p.flipT >= 0) {
-      p.flipT += dt / 0.5;
-      const t = Math.min(1, p.flipT);
-      p.flip = TAU * (1 - Math.pow(1 - t, 3));
-      if (p.flipT >= 1) {
-        p.flipT = -1;
-        p.flip = 0;
-      }
-    }
-
-    // rotasi mengikuti lereng
-    if (!dead && p.onGround) {
-      const tr = Math.atan(slopeAt(p.x)) * 0.85;
-      p.rot += (tr - p.rot) * Math.min(1, dt * 14);
-    }
-
-    // kamera
+    // kamera: titik fokus di antara naga dan tanah di depannya
     this.camX = p.x - PSX;
-    const aheadGround = groundY(p.x + 150);
-    const airOffset = Math.min(0, (p.y - aheadGround) * 0.42);
-    const ty = aheadGround + airOffset;
-    this.camY += (ty - this.camY) * Math.min(1, dt * 3.5);
+    // Kamera condong ke tanah di depan, jadi naik-turun naga terasa jelas di layar
+    const ahead = groundY(p.x + 185);
+    const fy = this.state === 'menu' ? lerp(ahead, p.y, 0.34) : lerp(ahead, p.y, 0.3);
+    this.camY += (fy - this.camY) * (1 - Math.exp(-dt * 3.4));
 
-    // Zoom out kamera 2x secara halus (target 0.5) saat ngeboost, melebar dinamis hingga 0.42 saat 5x
     const targetZoom = this.boostT > 0
-      ? 0.52 - 0.1 * clamp((this.boostMult - 2.0) / 3.0, 0, 1)
+      ? 0.74 - 0.12 * clamp((this.boostMult - BOOST_MULT_MIN) / (BOOST_MULT_MAX - BOOST_MULT_MIN), 0, 1)
       : 1.0;
-    const zoomSpeed = this.boostT > 0 ? 2.8 : 3.5;
-    this.camZoom += (targetZoom - this.camZoom) * (1 - Math.exp(-dt * zoomSpeed));
+    this.camZoom += (targetZoom - this.camZoom) * (1 - Math.exp(-dt * (this.boostT > 0 ? 2.8 : 3.4)));
 
-    // kilat visual
     const bt = this.boostT > 0 ? 1 : 0;
     this.boostK += (bt - this.boostK) * Math.min(1, dt * 6);
 
@@ -1164,68 +1158,13 @@ export class Game {
     this.flash = Math.max(0, this.flash - dt * 2.2);
     this.fade = Math.max(0, this.fade - dt * 1.6);
 
-    // pita
-    const nx = p.x + lerp(1, -22, p.wSlide);
-    const ny = p.y - lerp(57, 23, p.wSlide);
-    const rb = this.ribbon;
-    rb[0].x = nx;
-    rb[0].y = ny;
-    for (let i = 1; i < rb.length; i++) {
-      const a = rb[i - 1];
-      const b = rb[i];
-      b.y += 22 * dt * (i / rb.length);
-      const dx = b.x - a.x;
-      const dy = b.y - a.y;
-      const d = Math.hypot(dx, dy) || 1;
-      b.x = a.x + (dx / d) * RIB_L;
-      b.y = a.y + (dy / d) * RIB_L;
-    }
 
-    // debu lari
-    if (!dead && p.onGround && (this.state === 'playing' || this.state === 'menu')) {
-      p.dustT -= dt;
-      if (p.dustT <= 0) {
-        p.dustT = p.sliding ? 0.03 : 0.07;
-        this.emit(p.x - 6, p.y - 1, -rand(10, 60), -rand(5, 45), rand(0.35, 0.6), rand(2.5, 4.8), this.dustCss, 0);
-        if (p.sliding) {
-          this.emit(p.x - 12, p.y - 2, -rand(0, 60), -rand(20, 80), 0.3, 1.8, '#ffe27a', 1);
-        }
-      }
-    }
-
-    // percikan kilat
-    if (this.boostK > 0.3 && this.state === 'playing') {
-      for (let i = 0; i < 2; i++) {
-        this.emit(
-          p.x - rand(0, 24),
-          p.y - rand(2, 64),
-          -rand(0, 200),
-          rand(-80, 80),
-          rand(0.15, 0.3),
-          rand(1.4, 2.4),
-          Math.random() < 0.5 ? '#ffd84a' : '#fffbe0',
-          1,
-        );
-      }
-      this.ghostT -= dt;
-      if (this.ghostT <= 0) {
-        this.ghostT = 0.035;
-        this.ghosts.push({
-          x: p.x,
-          y: p.y,
-          rot: p.rot,
-          flip: p.flip,
-          view: this.runnerView(),
-          life: GHOST_LIFE,
-        });
-      }
-    }
+    // partikel
     for (let i = this.ghosts.length - 1; i >= 0; i--) {
       this.ghosts[i].life -= dt;
       if (this.ghosts[i].life <= 0) this.ghosts.splice(i, 1);
     }
-
-    // partikel
+    while (this.ghosts.length > 4) this.ghosts.shift();
     for (let i = this.particles.length - 1; i >= 0; i--) {
       const q = this.particles[i];
       q.life -= dt;
@@ -1241,17 +1180,19 @@ export class Game {
     }
   }
 
-  private runnerView(): RunnerView {
+  private dragonView(): DragonView {
     const p = this.p;
+    const dead = this.state === 'dying' || this.state === 'over';
     return {
-      phase: p.phase,
-      lean: clamp((this.speed - 300) / 700, 0, 1),
-      vy: p.vy,
-      wAir: p.wAir,
-      wSlide: p.wSlide,
-      wDead: p.wDead,
-      airTime: p.airTime,
-      ragdollFlail: p.ragdollFlail,
+      time: this.time,
+      pitch: p.pitch,
+      roll: p.roll,
+      flap: p.flap,
+      flapAmp: p.flapAmp,
+      glow: this.boostK,
+      dead: p.dead,
+      dir: 1,
+      bob: dead ? 0 : Math.sin(p.bobT * 2.1) * 2.4,
     };
   }
 
@@ -1273,10 +1214,9 @@ export class Game {
     }
     ctx.save();
 
-    // Kamera zoom out 2x secara smooth saat boost
     const z = this.camZoom;
     const focusX = W * 0.42;
-    const focusY = GS - 60;
+    const focusY = FLY_Y;
     ctx.translate(focusX, focusY);
     ctx.scale(z, z);
     ctx.translate(-focusX, -focusY);
@@ -1290,7 +1230,6 @@ export class Game {
     for (const o of this.obstacles) {
       if (o.dead) continue;
       if (o.kind === 'rock') this.drawRock(o, pal);
-      else if (o.kind === 'slab') this.drawSlab(o, pal);
       else this.drawBoulder(o, pal);
     }
     this.drawOrbs();
@@ -1311,88 +1250,27 @@ export class Game {
     const ctx = this.ctx;
     const c = pal.c;
     const camX = this.camX;
-    const margin = (W / Math.min(0.4, this.camZoom)) + 300;
+    const margin = W / Math.min(0.4, this.camZoom) + 300;
     const x0 = camX - margin;
     const x1 = camX + W + margin;
-    const groundBottom = H + 600;
-
-    // jurang
-    for (const g of this.gaps) {
-      if (g.x1 < x0 || g.x0 > x1) continue;
-      const xs0 = g.x0 - camX;
-      const xs1 = g.x1 - camX;
-      const n = Math.max(2, Math.ceil((g.x1 - g.x0) / 10));
-      ctx.beginPath();
-      ctx.moveTo(xs0, this.sy(g.x0));
-      for (let i = 1; i <= n; i++) {
-        const wx = g.x0 + ((g.x1 - g.x0) * i) / n;
-        ctx.lineTo(wx - camX, this.sy(wx));
-      }
-      ctx.lineTo(xs1, groundBottom);
-      ctx.lineTo(xs0, groundBottom);
-      ctx.closePath();
-      const ag = ctx.createLinearGradient(0, GS - 90, 0, groundBottom);
-      ag.addColorStop(0, css(mix(c.gBot, c.obs, 0.5)));
-      ag.addColorStop(1, css(c.obs));
-      ctx.fillStyle = ag;
-      ctx.fill();
-      const sg = ctx.createLinearGradient(xs0, 0, xs1, 0);
-      sg.addColorStop(0, 'rgba(0,0,0,0.38)');
-      sg.addColorStop(0.2, 'rgba(0,0,0,0)');
-      sg.addColorStop(0.8, 'rgba(0,0,0,0)');
-      sg.addColorStop(1, 'rgba(0,0,0,0.38)');
-      ctx.fillStyle = sg;
-      ctx.fill();
-
-      // jembatan kilat
-      if (this.boostK > 0.05) {
-        const seed = Math.floor(this.time * 20);
-        ctx.beginPath();
-        for (let i = 0; i <= n; i++) {
-          const wx = g.x0 + ((g.x1 - g.x0) * i) / n;
-          const y = this.sy(wx) + (hash(i * 3.1 + seed) - 0.5) * 8;
-          if (i === 0) ctx.moveTo(wx - camX, y);
-          else ctx.lineTo(wx - camX, y);
-        }
-        ctx.lineJoin = 'round';
-        ctx.strokeStyle = `rgba(255,215,64,${0.5 * this.boostK})`;
-        ctx.lineWidth = 8;
-        ctx.stroke();
-        ctx.strokeStyle = `rgba(255,255,235,${0.95 * this.boostK})`;
-        ctx.lineWidth = 2.2;
-        ctx.stroke();
-      }
-    }
-
-    // segmen tanah
-    const segs: [number, number][] = [];
-    let cur = x0;
-    for (const g of this.gaps) {
-      if (g.x1 <= cur) continue;
-      if (g.x0 >= x1) break;
-      if (g.x0 > cur) segs.push([cur, g.x0]);
-      cur = Math.max(cur, g.x1);
-    }
-    if (cur < x1) segs.push([cur, x1]);
+    const groundBottom = H + 900;
 
     const ground = new Path2D();
     const rim = new Path2D();
-    for (const [a, b] of segs) {
-      const n = Math.max(1, Math.ceil((b - a) / 8));
-      ground.moveTo(a - camX, groundBottom);
-      for (let i = 0; i <= n; i++) {
-        const wx = a + ((b - a) * i) / n;
-        const x = wx - camX;
-        const y = this.sy(wx);
-        ground.lineTo(x, y);
-        if (i === 0) rim.moveTo(x, y);
-        else rim.lineTo(x, y);
-      }
-      ground.lineTo(b - camX, groundBottom);
-      ground.closePath();
+    const n = Math.max(1, Math.ceil((x1 - x0) / 8));
+    ground.moveTo(x0 - camX, groundBottom);
+    for (let i = 0; i <= n; i++) {
+      const wx = x0 + ((x1 - x0) * i) / n;
+      const x = wx - camX;
+      const y = this.sy(wx);
+      ground.lineTo(x, y);
+      if (i === 0) rim.moveTo(x, y);
+      else rim.lineTo(x, y);
     }
+    ground.lineTo(x1 - camX, groundBottom);
+    ground.closePath();
 
-    const grd = ctx.createLinearGradient(0, GS - 120, 0, groundBottom);
+    const grd = ctx.createLinearGradient(0, GS - 60, 0, groundBottom);
     grd.addColorStop(0, css(c.gTop));
     grd.addColorStop(1, css(c.gBot));
     ctx.fillStyle = grd;
@@ -1430,7 +1308,7 @@ export class Game {
     const ctx = this.ctx;
     const c = pal.c;
     const cell = 75;
-    const margin = (W / Math.min(0.4, this.camZoom)) + 300;
+    const margin = W / Math.min(0.4, this.camZoom) + 300;
     const first = Math.floor((this.camX - margin) / cell) - 1;
     const last = Math.floor((this.camX + W + margin) / cell) + 1;
     const col = mix(c.gBot, c.obs, 0.25);
@@ -1440,11 +1318,9 @@ export class Game {
       const hval = hash(ci * 2.17);
       if (hval > 0.58) continue;
       const wx = ci * cell + hash(ci * 5.1) * cell;
-      if (this.isGap(wx) || this.isGap(wx - 16) || this.isGap(wx + 16)) continue;
       const x = wx - this.camX;
       const y = groundY(wx) - this.camY + GS;
-      const slope = slopeAt(wx);
-      const rot = Math.atan(slope);
+      const rot = Math.atan(slopeAt(wx));
 
       ctx.save();
       ctx.translate(x, y);
@@ -1452,7 +1328,7 @@ export class Game {
 
       const dType = hash(ci * 7.7);
       if (dType < 0.25) {
-        // Bendera doa gurun berkibar (prayer flag poles khas Alto's Odyssey)
+        // Bendera doa gurun berkibar (khas Alto's Odyssey)
         const poleH = 20 + hash(ci * 3.1) * 18;
         ctx.strokeStyle = css(mix(col, c.rim, 0.35), 0.85);
         ctx.lineWidth = 1.6;
@@ -1472,12 +1348,12 @@ export class Game {
         ctx.closePath();
         ctx.fill();
       } else if (dType < 0.52) {
-        // Tumpukan batu gurun kuno (stone cairn)
+        // Tumpukan batu gurun kuno
         ctx.fillStyle = css(stoneCol, 0.85);
         const stones = 3 + Math.floor(hash(ci * 9.1) * 2);
         let currY = 0;
         for (let s = 0; s < stones; s++) {
-          const sw = (7 - s * 1.4) + hash(ci + s) * 2;
+          const sw = 7 - s * 1.4 + hash(ci + s) * 2;
           const sh = 3.5 + hash(ci * 2 + s) * 2;
           ctx.beginPath();
           ctx.ellipse(hash(ci * 3 + s) * 2 - 1, currY - sh / 2, sw, sh / 2, 0, 0, TAU);
@@ -1511,7 +1387,7 @@ export class Game {
     const camX = this.camX;
     const camY = this.camY;
     const xs = r.x - camX;
-    const margin = (W / Math.min(0.4, this.camZoom)) + 300;
+    const margin = W / Math.min(0.4, this.camZoom) + 300;
     if (xs > W + margin || xs + r.w < -margin) return;
     const pt = (u: number, v: number): [number, number] => {
       const wx = r.x + u * r.w;
@@ -1571,121 +1447,11 @@ export class Game {
     }
   }
 
-  private drawSlab(a: Slab, pal: Palette) {
-    const ctx = this.ctx;
-    const c = pal.c;
-    const camX = this.camX;
-    const camY = this.camY;
-    const xs = a.x - camX;
-    const margin = (W / Math.min(0.4, this.camZoom)) + 300;
-    if (xs > W + margin || xs + a.w < -margin) return;
-    const X0 = a.x;
-    const X1 = a.x + a.w;
-    const gc = groundY(a.x + a.w / 2);
-    const topY = gc - ARCH_H;
-    const j = (n: number) => hash(a.seed + n * 3.17);
-    const S = (wx: number, wy: number): [number, number] => [wx - camX, wy - camY + GS];
-    const bob = Math.sin(this.time * 1.6 + a.seed) * 2.5;
-    const bot = (wx: number) => groundY(wx) - TUNNEL_V + bob;
-
-    ctx.beginPath();
-    let q = S(X0, bot(X0));
-    ctx.moveTo(q[0], q[1]);
-    q = S(X0 - 5 + j(1) * 6, topY + 80 + j(2) * 20);
-    ctx.lineTo(q[0], q[1]);
-    let c1 = S(X0 + 2, topY + 6);
-    let e1 = S(X0 + 36, topY + j(3) * 10);
-    ctx.quadraticCurveTo(c1[0], c1[1], e1[0], e1[1]);
-    q = S(X0 + a.w * 0.58, topY - 8 + j(4) * 12);
-    ctx.lineTo(q[0], q[1]);
-    c1 = S(X1 - 4, topY + 4);
-    e1 = S(X1 + 2 - j(5) * 6, topY + 78 + j(6) * 20);
-    ctx.quadraticCurveTo(c1[0], c1[1], e1[0], e1[1]);
-    q = S(X1, bot(X1));
-    ctx.lineTo(q[0], q[1]);
-    for (let i = 7; i >= 0; i--) {
-      const wx = X0 + (a.w * i) / 8;
-      q = S(wx, bot(wx));
-      ctx.lineTo(q[0], q[1]);
-    }
-    ctx.closePath();
-
-    const top = topY - camY + GS;
-    const g = ctx.createLinearGradient(0, top, 0, top + ARCH_H - TUNNEL_V);
-    g.addColorStop(0, css(mix(c.obs, c.obsLight, 0.22)));
-    g.addColorStop(1, css(c.obs));
-    ctx.fillStyle = g;
-    ctx.fill();
-    ctx.lineJoin = 'round';
-    ctx.strokeStyle = css(c.obs);
-    ctx.lineWidth = 6;
-    ctx.stroke();
-
-    // strata & hiasan
-    ctx.save();
-    ctx.clip();
-    ctx.strokeStyle = css(c.obsLight, 0.13);
-    ctx.lineWidth = 3;
-    for (let i = 0; i < 3; i++) {
-      const yy = topY + 55 + i * 42 + j(10 + i) * 8;
-      ctx.beginPath();
-      const s0 = S(X0 - 10, yy);
-      const s1 = S(X1 + 10, yy + 6);
-      ctx.moveTo(s0[0], s0[1]);
-      ctx.lineTo(s1[0], s1[1]);
-      ctx.stroke();
-    }
-    // sisi gelap kanan
-    ctx.fillStyle = 'rgba(0,0,0,0.16)';
-    const r0 = S(X0 + a.w * 0.62, topY - 20);
-    const r1 = S(X1 + 20, topY - 20);
-    const r2 = S(X1 + 20, gc);
-    const r3 = S(X0 + a.w * 0.5, gc);
-    ctx.beginPath();
-    ctx.moveTo(r0[0], r0[1]);
-    ctx.lineTo(r1[0], r1[1]);
-    ctx.lineTo(r2[0], r2[1]);
-    ctx.lineTo(r3[0], r3[1]);
-    ctx.closePath();
-    ctx.fill();
-    ctx.restore();
-
-    // garis cahaya di bawah batu melayang
-    ctx.beginPath();
-    for (let i = 0; i <= 8; i++) {
-      const wx = X0 + 4 + ((a.w - 8) * i) / 8;
-      const p2 = S(wx, bot(wx) - 1);
-      if (i === 0) ctx.moveTo(p2[0], p2[1]);
-      else ctx.lineTo(p2[0], p2[1]);
-    }
-    ctx.strokeStyle = css(c.obsLight, 0.85);
-    ctx.lineWidth = 2.2;
-    ctx.stroke();
-    // pancaran halus
-    const wx0 = X0 + a.w / 2;
-    const gp = S(wx0, bot(wx0));
-    const gl = ctx.createRadialGradient(gp[0], gp[1] + 6, 4, gp[0], gp[1] + 6, a.w * 0.6);
-    gl.addColorStop(0, css(c.obsLight, 0.28));
-    gl.addColorStop(1, css(c.obsLight, 0));
-    ctx.fillStyle = gl;
-    ctx.fillRect(gp[0] - a.w * 0.6, gp[1] - 10, a.w * 1.2, 40);
-
-    // kerikil melayang
-    ctx.fillStyle = css(c.obs, 0.9);
-    for (let i = 0; i < 4; i++) {
-      const wx = X0 + 14 + ((a.w - 28) * (i + 0.5)) / 4;
-      const pp = S(wx, bot(wx) + 8 + Math.sin(this.time * 2 + i * 1.7 + a.seed) * 3);
-      ctx.beginPath();
-      ctx.arc(pp[0], pp[1], 2.4 + (i % 2), 0, TAU);
-      ctx.fill();
-    }
-  }
-
   private drawBoulder(b: Boulder, pal: Palette) {
     const ctx = this.ctx;
     const c = pal.c;
     const sx = b.x - this.camX;
-    const margin = (W / Math.min(0.4, this.camZoom)) + 300;
+    const margin = W / Math.min(0.4, this.camZoom) + 300;
     if (sx > W + margin || sx < -margin) return;
     const by = groundY(b.x) - b.r - this.camY + GS;
     ctx.save();
@@ -1720,7 +1486,7 @@ export class Game {
 
   private drawOrbs() {
     const ctx = this.ctx;
-    const margin = (W / Math.min(0.4, this.camZoom)) + 300;
+    const margin = W / Math.min(0.4, this.camZoom) + 300;
     for (const o of this.orbList) {
       if (o.taken) continue;
       const x = o.x - this.camX;
@@ -1752,74 +1518,62 @@ export class Game {
     }
   }
 
-  private drawRunnerAt(x: number, y: number, rot: number, flip: number, land: number, view: RunnerView, tint: string | null, alpha: number) {
+  private drawDragonAt(x: number, y: number, pitch: number, view: DragonView, alpha: number, tint: string | null) {
     const ctx = this.ctx;
     ctx.save();
     ctx.globalAlpha = alpha;
     ctx.translate(x - this.camX, y - this.camY + GS);
-    ctx.rotate(rot);
-
-    // Dynamic ragdoll elastic bounce & stretch
-    if (land > 0) {
-      const bounce = Math.sin(land * Math.PI) * 0.28 * land;
-      ctx.scale(1 + bounce, 1 - bounce);
-    } else if (this.p.stretch && this.p.stretch !== 1) {
-      const s = this.p.stretch;
-      ctx.scale(1 / Math.sqrt(s), s);
+    ctx.rotate(pitch);
+    if (tint) {
+      // siluet putih saat kebal setelah kilat
+      ctx.shadowColor = tint;
+      ctx.shadowBlur = 14;
     }
-
-    if (flip !== 0) {
-      ctx.translate(0, -32);
-      ctx.rotate(flip);
-      ctx.translate(0, 32);
-    }
-    drawRunner(ctx, view, tint);
+    drawDragon(ctx, view);
     ctx.restore();
   }
 
-  private drawPlayer(pal: Palette) {
+  private drawPlayer(_pal: Palette) {
     const ctx = this.ctx;
     const p = this.p;
     const sx = p.x - this.camX;
     const sy = p.y - this.camY + GS;
     const bk = this.boostK;
 
-    // bayangan
+    // bayangan di lereng (jadi penanda ketinggian terbang)
     const gy = this.sy(p.x);
-    if (!this.isGap(p.x) || bk > 0.5) {
-      const hgt = Math.max(0, gy - sy);
-      const a = 0.22 * clamp(1 - hgt / 260, 0, 1);
-      if (a > 0.01) {
-        ctx.fillStyle = `rgba(0,0,0,${a})`;
-        ctx.beginPath();
-        ctx.ellipse(sx, gy + 3, Math.max(8, 22 - hgt * 0.05), 4, 0, 0, TAU);
-        ctx.fill();
-      }
+    const hgt = Math.max(0, gy - sy);
+    const a = 0.26 * clamp(1 - hgt / 900, 0, 1);
+    if (a > 0.01) {
+      ctx.fillStyle = `rgba(0,0,0,${a})`;
+      ctx.beginPath();
+      ctx.ellipse(sx, gy + 3, Math.max(10, 34 - hgt * 0.02), 5.5, 0, 0, TAU);
+      ctx.fill();
     }
 
-    // aura
+    // aura kilat
     if (bk > 0.03) {
-      const cy = sy - 34;
-      const ag = ctx.createRadialGradient(sx, cy, 6, sx, cy, 90);
+      const cy = sy - 16;
+      const ag = ctx.createRadialGradient(sx, cy, 6, sx, cy, 110);
       ag.addColorStop(0, `rgba(255,226,110,${0.5 * bk})`);
       ag.addColorStop(1, 'rgba(255,226,110,0)');
       ctx.fillStyle = ag;
-      ctx.fillRect(sx - 100, cy - 100, 200, 200);
+      ctx.fillRect(sx - 120, cy - 120, 240, 240);
     }
 
-    // sambaran kilat di belakang
+    // sambaran kilat di belakang naga
     if (bk > 0.05) {
       const seed = Math.floor(this.time * 24);
       ctx.lineCap = 'round';
       ctx.lineJoin = 'round';
       for (let b = 0; b < 3; b++) {
-        const y0 = sy - 14 - b * 20;
-        const len = 140 + hash(seed + b * 3) * 130;
+        const y0 = sy - 6 - b * 18;
+        const len = 150 + hash(seed + b * 3) * 140;
         const n = 7;
         ctx.beginPath();
-        ctx.moveTo(sx - 6, y0);
+        ctx.moveTo(sx - 16, y0);
         for (let i = 1; i <= n; i++) {
-          ctx.lineTo(sx - 6 - (len * i) / n, y0 + (hash(seed * 3.1 + b * 11 + i) - 0.5) * 26);
+          ctx.lineTo(sx - 16 - (len * i) / n, y0 + (hash(seed * 3.1 + b * 11 + i) - 0.5) * 26);
         }
         ctx.strokeStyle = `rgba(255,214,64,${0.38 * bk})`;
         ctx.lineWidth = 5;
@@ -1830,58 +1584,18 @@ export class Game {
       }
     }
 
-    // bayangan gerak
+    // jejak gerak (ghost) saat ngebut
     for (const g of this.ghosts) {
-      this.drawRunnerAt(g.x, g.y, g.rot, g.flip, 0, g.view, '#ffe27a', (g.life / GHOST_LIFE) * 0.38);
+      this.drawDragonAt(g.x, g.y, g.pitch, g.view, (g.life / GHOST_LIFE) * 0.1, '#ffe27a');
     }
 
-    // pita / syal
-    this.drawRibbon(pal);
-
-    // pelari
-    this.drawRunnerAt(p.x, p.y, p.rot, p.flip, p.land, this.runnerView(), null, 1);
+    // naga
+    this.drawDragonAt(p.x, p.y, p.pitch, this.dragonView(), 1, null);
 
     // kedip saat kebal setelah kilat
     if (this.invuln > 0 && Math.floor(this.time * 18) % 2 === 0) {
-      this.drawRunnerAt(p.x, p.y, p.rot, p.flip, p.land, this.runnerView(), '#ffffff', 0.35);
+      this.drawDragonAt(p.x, p.y, p.pitch, this.dragonView(), 0.32, '#ffffff');
     }
-  }
-
-  private drawRibbon(pal: Palette) {
-    const ctx = this.ctx;
-    const rb = this.ribbon;
-    const n = rb.length;
-    const boosting = this.boostK > 0.5;
-    const col = boosting ? '#fff3a0' : '#ffd23f';
-    const hi = boosting ? '#ffffff' : '#fff0a8';
-    ctx.lineCap = 'round';
-    ctx.lineJoin = 'round';
-    const xs: number[] = [];
-    const ys: number[] = [];
-    for (let i = 0; i < n; i++) {
-      xs.push(rb[i].x - this.camX);
-      ys.push(rb[i].y - this.camY + GS + Math.sin(this.time * 16 - i * 0.75) * i * 0.22);
-    }
-    for (let i = 0; i < n - 1; i++) {
-      const w = 7 * Math.pow(1 - i / n, 0.9) + 0.8;
-      ctx.strokeStyle = col;
-      ctx.lineWidth = w;
-      ctx.beginPath();
-      ctx.moveTo(xs[i], ys[i]);
-      ctx.lineTo(xs[i + 1], ys[i + 1]);
-      ctx.stroke();
-    }
-    for (let i = 0; i < n - 1; i++) {
-      const w = 2.4 * Math.pow(1 - i / n, 0.9);
-      if (w < 0.4) break;
-      ctx.strokeStyle = hi;
-      ctx.lineWidth = w;
-      ctx.beginPath();
-      ctx.moveTo(xs[i], ys[i] - 0.4);
-      ctx.lineTo(xs[i + 1], ys[i + 1] - 0.4);
-      ctx.stroke();
-    }
-    void pal;
   }
 
   private drawParticles() {

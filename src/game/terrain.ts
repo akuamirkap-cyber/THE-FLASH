@@ -1,110 +1,91 @@
 import { smooth } from './util';
 
 /**
- * Alto's Odyssey-style Downhill Desert Mountain Terrain.
+ * Medan gurun bergunung ala Alto's Odyssey.
  *
- * Sifat:
- * - DOWNHILL HALUS: Bukan jalan datar, melainkan lereng gunung menurun secara
- *   kontinu (semakin lama semakin ke bawah).
- * - Kemiringan rata-rata menurun ~ +0.145 (~8-9 derajat kemiringan gunung).
- * - Diperkaya dengan bukit pelontar (launch swoops), cekungan ngarai pasir,
- *   bukit sabit (barchan dunes), dan lembah carving khas Alto's Odyssey.
+ * Prinsip desain:
+ * - TIDAK ADA GARIS LURUS. Kemiringan dasar gunung pun ikut berombak: kadang
+ *   landai, kadang menukik — jadi terasa "menurun miring" terus berubah,
+ *   bukan satu garis diagonal statis.
+ * - Semua bentuk dibangun dari jumlah gelombang sinus (mulus, turunan kontinu
+ *   tak terputus) dengan frekuensi tak harmonik agar bentuknya tidak berulang
+ *   dan tidak pernah kelihatan kaku.
+ * - Bukit pasir besar (dune) berpadu dengan riak pasir kecil, sehingga
+ *   punggung bukit membulat halus lalu melandai turun seperti di Alto's Odyssey.
  */
 
-export const DOWNHILL_SLOPE = 0.145;
+export const DOWNHILL_SLOPE = 0.135;
 
-// Lengkungan asimetris bukit pasir sabit (barchan dune: lereng landai naik, turunan tajam)
-function barchan(u: number): number {
-  return (
-    Math.sin(u) * 0.72 +
-    Math.sin(2 * u - 0.7) * 0.36 +
-    Math.sin(3 * u - 1.3) * 0.12
-  );
+interface Wave {
+  f: number;
+  a: number;
+  p: number;
 }
 
-// Lengkungan pelontar (launch swoop: lembah akselerasi meluncur ke punggung bukit)
-function launchRamp(u: number): number {
-  const s = Math.sin(u);
-  return s > 0 ? Math.pow(s, 1.4) : -Math.pow(-s, 0.85);
+// Kemiringan dasar gunung yang berombak sangat panjang (integralnya mulus).
+// Amplitudo a/f menentukan tinggi gelombang penurunan.
+const DESCENT: Wave[] = [
+  { f: 0.00042, a: 0.055, p: 0.6 },
+  { f: 0.00107, a: 0.03, p: 2.3 },
+  { f: 0.00253, a: 0.014, p: 4.1 },
+];
+
+// Bukit pasir: gelombang panjang + sedang + riak halus (semua membulat).
+const DUNES: Wave[] = [
+  { f: 0.00168, a: 132, p: 1.1 },
+  { f: 0.00261, a: 70, p: 3.4 },
+  { f: 0.00506, a: 30, p: 0.3 },
+  { f: 0.00913, a: 12, p: 2.0 },
+  { f: 0.01573, a: 5, p: 5.2 },
+  { f: 0.0305, a: 2, p: 1.7 },
+];
+
+// Punggung bukit karang/mesa besar yang muncul berkala (tetap membulat).
+function megaDune(x: number): number {
+  const u = x * 0.00071 + 0.8;
+  // Kombinasi dua sinus berdekatan → bentuk bonggol panjang lalu turun landai
+  const b = Math.sin(u) * 0.68 + Math.sin(u * 1.87 + 1.3) * 0.32;
+  return Math.pow(Math.max(0, b), 1.35) * 190 - 42;
 }
 
-// Plato teras bertingkat
-function plateau(u: number): number {
-  return Math.tanh(Math.sin(u) * 2.0) * 0.9;
+// Kemiringan dasar gunung pada titik x (selalu berombak halus).
+export function baseSlope(x: number): number {
+  let s = DOWNHILL_SLOPE;
+  for (let i = 0; i < DESCENT.length; i++) {
+    const d = DESCENT[i];
+    s += d.a * Math.cos(x * d.f + d.p);
+  }
+  return s;
+}
+
+// Penurunan gunung: integral mulus dari baseSlope (sehingga tebing terasa miring).
+function descent(x: number): number {
+  let y = DOWNHILL_SLOPE * x;
+  for (let i = 0; i < DESCENT.length; i++) {
+    const d = DESCENT[i];
+    y += -(d.a / d.f) * Math.cos(x * d.f + d.p);
+  }
+  return y;
+}
+
+function dunes(x: number): number {
+  let h = megaDune(x);
+  for (let i = 0; i < DUNES.length; i++) {
+    const d = DUNES[i];
+    // Modulasi amplitudo: bukit kadang tinggi kadang rendah (tanpa sudut tajam)
+    const mod = 0.62 + 0.38 * Math.sin(x * 0.00061 + i * 2.1);
+    h += d.a * mod * Math.sin(x * d.f + d.p);
+  }
+  return h;
 }
 
 export function groundY(x: number): number {
-  // Transisi awal halus agar bagian menu/start lembut
-  const intro = smooth((x - 200) / 1000);
-
-  // 1. Lereng gunung DOWNHILL KONTINU (y bertambah positif ke bawah di kanvas)
-  // Ini kunci agar pelari selalu meluncur menuruni lereng gunung!
-  const mountainDownhill = x * DOWNHILL_SLOPE;
-
-  // 2. Undulasi makro punggung gunung pasir
-  const macro =
-    55 * Math.sin(x * 0.00028 + 0.9) +
-    28 * Math.sin(x * 0.00014 + 2.4);
-
-  // 3. Multi-formasi bukit pasir Alto's Odyssey yang berbaur dinamis
-  const cycle = (x * 0.00036) % 5;
-  const c0 = Math.max(0, 1 - Math.abs(cycle - 0)); // Grand Launch Swoops
-  const c1 = Math.max(0, 1 - Math.abs(cycle - 1)); // Canyon Basin & Dips
-  const c2 = Math.max(0, 1 - Math.abs(cycle - 2)); // Crescent Barchan Dunes
-  const c3 = Math.max(0, 1 - Math.abs(cycle - 3)); // Mesa Plateaus & Step Drops
-  const c4 = Math.max(0, 1 - Math.abs(cycle - 4)); // Flow Rhythms
-  const sum = c0 + c1 + c2 + c3 + c4 || 1;
-  const w0 = c0 / sum;
-  const w1 = c1 / sum;
-  const w2 = c2 / sum;
-  const w3 = c3 / sum;
-  const w4 = c4 / sum;
-
-  // Zone 0: Launch Swoops (lembah dalam untuk akselerasi luncur cepat)
-  const duneLaunch =
-    88 * launchRamp(x * 0.0012 + 1.2) +
-    30 * Math.sin(x * 0.0029 + 0.4);
-
-  // Zone 1: Canyon Basin & Steep Dips
-  const duneCanyon =
-    -35 +
-    70 * Math.sin(x * 0.0017 + 2.1) +
-    40 * barchan(x * 0.0034 + 0.8);
-
-  // Zone 2: Crescent Dunes (punggung tajam & turunan terjal)
-  const duneCrescent =
-    95 * barchan(x * 0.0015 + 0.3) +
-    24 * Math.sin(x * 0.0042 + 1.7);
-
-  // Zone 3: Mesa Plateaus & Step Drops
-  const duneMesa =
-    75 * plateau(x * 0.00125 + 0.5) +
-    32 * Math.sin(x * 0.003 + 1.9);
-
-  // Zone 4: Flow Dunes (ombak pasir bergulir ritmik)
-  const duneRolling =
-    65 * Math.sin(x * 0.0019 + 0.7) +
-    36 * Math.sin(x * 0.0038 + 2.2) +
-    16 * Math.sin(x * 0.0078 + 1.1);
-
-  const meso =
-    duneLaunch * w0 +
-    duneCanyon * w1 +
-    duneCrescent * w2 +
-    duneMesa * w3 +
-    duneRolling * w4;
-
-  // 4. Riak pasir halus (tekstur papan seluncur)
-  const micro =
-    6 * Math.sin(x * 0.0094 + 0.3) +
-    3 * Math.sin(x * 0.02 + 2.1);
-
-  // Total koordinat tanah:
-  // mountainDownhill selalu mendorong arah ke bawah (+y) menuruni lereng gunung,
-  // dihiasi bukit pasir, lembah akselerasi, dan puncak melengkung.
-  return mountainDownhill * intro - (macro + meso + micro) * intro;
+  // Bagian awal (menu) diblend halus agar tidak ada patahan bentuk
+  const intro = smooth((x - 260) / 1100);
+  const flat = 6 * Math.sin(x * 0.0009);
+  return (descent(x) - dunes(x)) * intro + flat * (1 - intro);
 }
 
 export function slopeAt(x: number): number {
-  return (groundY(x + 5) - groundY(x - 5)) / 10;
+  return (groundY(x + 6) - groundY(x - 6)) / 12;
 }

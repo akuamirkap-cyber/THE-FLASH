@@ -182,6 +182,20 @@ export class Sfx {
   fall() {
     this.tone(500, 0.8, 'sine', 0.1, 90, 0.2);
   }
+  /** Sayap mengepak (dipakai sesekali saat menanjak). */
+  flap() {
+    this.noise(0.22, 420, 0.045, 0.5, 'lowpass', 180);
+    this.tone(120, 0.18, 'sine', 0.05, 70);
+  }
+  /** Kilat ditolak karena energinya belum cukup. */
+  deny() {
+    this.tone(240, 0.12, 'triangle', 0.07, 150);
+  }
+  /** Kilat habis. */
+  boostEnd() {
+    this.tone(600, 0.4, 'sine', 0.07, 180, 0.3);
+    this.noise(0.5, 900, 0.06, 0.6, 'bandpass', 260);
+  }
 
   update(dt: number, speedNorm: number, active: boolean, energy: number) {
     const ctx = this.ctx;

@@ -151,8 +151,8 @@ export function MenuView({
           <span className="pl-[0.6em] text-[1.1em] font-medium tracking-[0.6em]">ODYSSEY</span>
           <span className="h-px w-[2.6em] bg-white/60" />
         </div>
-        <p className="mt-[1.5em] text-[0.82em] uppercase tracking-[0.28em] text-white/80">
-          Berlari secepat cahaya
+        <p className="mt-[1.5em] text-center text-[0.82em] uppercase tracking-[0.28em] text-white/80">
+          Menunggang naga melintasi langit
         </p>
       </div>
 
@@ -161,7 +161,7 @@ export function MenuView({
           onClick={onStart}
           className="animate-[pulseGlow_2.4s_ease-in-out_infinite] rounded-full bg-gradient-to-b from-[#ffe58a] to-[#ffb62e] px-[3em] py-[0.95em] text-[1.15em] font-bold tracking-[0.32em] text-[#3a1d00] transition active:scale-95"
         >
-          <span className="pl-[0.32em]">MULAI LARI</span>
+          <span className="pl-[0.32em]">MULAI TERBANG</span>
         </button>
 
         <p className="text-[0.8em] tracking-[0.3em] text-white/75">
@@ -169,9 +169,9 @@ export function MenuView({
         </p>
 
         <div className={cn('grid w-full grid-cols-3 gap-[0.6em] rounded-[1.2em] p-[0.9em] text-center', glass)}>
-          <Legend icon={<ChevronsUp className="size-[1.5em]" />} title="KETUK" text="Lompat. Tahan = tinggi, ketuk lagi = lompat ganda" />
-          <Legend icon={<ChevronsDown className="size-[1.5em]" />} title="TAHAN KIRI" text="Meluncur di bawah batu melayang" />
-          <Legend icon={<BoltIcon className="size-[1.4em] text-[#ffd84a]" />} title="KILAT" text="Kumpulkan ✦ lalu aktifkan mode super cepat" />
+          <Legend icon={<ChevronsUp className="size-[1.5em]" />} title="W / ATAS" text="Tahan untuk menanjak ke langit" />
+          <Legend icon={<ChevronsDown className="size-[1.5em]" />} title="S / BAWAH" text="Tahan untuk menukik turun" />
+          <Legend icon={<BoltIcon className="size-[1.4em] text-[#ffd84a]" />} title="KILAT" text="Kumpulkan ✦ lalu tancap kilat di langit" />
         </div>
       </div>
     </div>
@@ -211,6 +211,10 @@ export function HudView({
         <div className="mt-[0.5em] flex items-center gap-[0.5em] text-[0.82em] tracking-[0.2em] opacity-90">
           <BoltIcon className={cn('size-[1.1em]', hud.boosting ? 'text-[#fff3a0]' : 'text-[#ffd84a]')} />
           <span className="tabular-nums">{hud.speed} KM/J</span>
+        </div>
+        <div className="mt-[0.35em] flex items-center gap-[0.4em] text-[0.72em] tracking-[0.2em] opacity-80">
+          <ChevronsUp className="size-[1em]" />
+          <span className="tabular-nums">TINGGI {hud.alt} M</span>
         </div>
       </div>
 
@@ -305,7 +309,7 @@ export function FlashButton({
             ? 'HYPER 5X!'
             : `${mult.toFixed(1)}X KILAT!`
           : active
-            ? 'PANJER!'
+            ? 'TANCAP!'
             : 'KILAT'}
       </span>
     </div>
@@ -314,7 +318,7 @@ export function FlashButton({
 
 const clamp01 = (v: number) => Math.min(1, Math.max(0, v));
 
-export function SlideHint({ pressed }: { pressed: boolean }) {
+export function DiveHint({ pressed }: { pressed: boolean }) {
   return (
     <div className="pointer-events-none absolute bottom-[1.5em] left-[1.3em] z-20 flex flex-col items-center gap-[0.35em]">
       <div
@@ -329,7 +333,7 @@ export function SlideHint({ pressed }: { pressed: boolean }) {
         className="text-[0.7em] font-bold tracking-[0.3em] text-white opacity-70"
         style={{ textShadow: '0 0.08em 0.4em rgba(0,0,0,0.4)' }}
       >
-        LUNCUR
+        TURUN
       </span>
     </div>
   );
@@ -343,10 +347,12 @@ export function TutorialHint({ show }: { show: boolean }) {
         show ? 'opacity-100' : 'opacity-0',
       )}
     >
-      <div className={cn('flex animate-[floaty_2.4s_ease-in-out_infinite] items-center gap-[0.9em] rounded-full px-[1.5em] py-[0.8em] text-[0.82em] tracking-[0.12em]', glass)}>
-        <span>Ketuk = lompat</span>
+      <div className={cn('flex animate-[floaty_2.4s_ease-in-out_infinite] items-center gap-[0.9em] rounded-full px-[1.5em] py-[0.8em] text-[0.8em] tracking-[0.12em]', glass)}>
+        <span>W / tahan atas = naik</span>
         <span className="h-[1.2em] w-px bg-white/40" />
-        <span>Tahan kiri = luncur</span>
+        <span>S / tahan bawah = turun</span>
+        <span className="h-[1.2em] w-px bg-white/40" />
+        <span>Kilat = melesat</span>
       </div>
     </div>
   );
@@ -410,7 +416,7 @@ export function OverView({
   return (
     <div className="absolute inset-0 z-40 flex animate-[fadeIn_0.6s_ease-out_both] items-center justify-center bg-[#0a0920]/45 text-white backdrop-blur-[2px]">
       <div className={cn('w-[82%] animate-[fadeUp_0.8s_ease-out_both] rounded-[1.6em] px-[1.4em] py-[2em] text-center', glass)}>
-        <p className="pl-[0.4em] text-[0.8em] tracking-[0.42em] text-white/70">LARIAN BERAKHIR</p>
+        <p className="pl-[0.4em] text-[0.8em] tracking-[0.42em] text-white/70">PENERBANGAN BERAKHIR</p>
         <p className="mt-[0.3em] flex items-baseline justify-center gap-[0.25em] font-light leading-none">
           <span className="text-[4.8em] tabular-nums">{summary.dist.toLocaleString('id-ID')}</span>
           <span className="text-[1.3em] opacity-80">m</span>
@@ -436,7 +442,7 @@ export function OverView({
             className="flex items-center gap-[0.7em] rounded-full bg-gradient-to-b from-[#ffe58a] to-[#ffb62e] px-[2.4em] py-[0.9em] text-[1.05em] font-bold tracking-[0.26em] text-[#3a1d00] transition active:scale-95"
           >
             <RestartIcon className="size-[1.1em]" />
-            LARI LAGI
+            TERBANG LAGI
           </button>
           <button onClick={onMenu} className="text-[0.75em] tracking-[0.3em] text-white/70 transition hover:text-white">
             MENU UTAMA
